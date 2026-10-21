@@ -6,6 +6,8 @@
 #                            (Releases → Draft a new release → tag v0.2.0 → Publish release)
 #   tag v* pushed            the same, and publish a release for that tag with the installers
 #                            (git tag v0.2.0 && git push origin v0.2.0)
+#   Run workflow + release   Actions → build → Run workflow, enter a tag such as v0.2.0: the same,
+#                            and GitHub creates that tag on the built commit and publishes the release
 #   Actions → Run workflow   build on demand
 #
 # The installers appear under the run's "Artifacts" (and on the release page for releases):
@@ -22,6 +24,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release:
+        description: 'Publish a release with this tag (e.g. v0.2.0); leave empty to only build'
+        required: false
+        default: ''
 
 concurrency:
   group: build-${{ github.ref }}
@@ -144,7 +151,7 @@ jobs:
 
   release:
     name: Attach installers to the release
-    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release != '')
     needs: bundle
     runs-on: ubuntu-22.04
     permissions:
@@ -157,7 +164,8 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
-          name: Signal / Noise ${{ github.event.release.tag_name || github.ref_name }}
+          tag_name: ${{ github.event.release.tag_name || inputs.release || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: Signal / Noise ${{ github.event.release.tag_name || inputs.release || github.ref_name }}
           make_latest: true
           files: installers/*
