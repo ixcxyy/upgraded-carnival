@@ -4,7 +4,6 @@
   const T = () => window.__TAURI__;
   const tauri = () => T() && T().core && T().core.invoke;
   const flushers = [];
-  const settle = (p, ms) => Promise.race([p, new Promise(r => setTimeout(r, ms))]);
   window.K28 = {
     desktop: !!tauri(),
     async call(cmd, args) {
@@ -25,8 +24,11 @@
     beforeQuit(fn) {
       flushers.push(fn);
     },
-    flush() {
-      return Promise.all(flushers.map(f => Promise.resolve().then(f).catch(() => {})));
+    async flush() {
+      const results = await Promise.allSettled(flushers.map(f => Promise.resolve().then(f)));
+      if (results.some(r => r.status === 'rejected' || r.value === false)) {
+        throw new Error('Some changes could not be saved. The window will stay open so you can retry.');
+      }
     },
     /** Close the game (desktop only). */
     async quit() {
@@ -34,7 +36,7 @@
       if (w) await w.close();
     },
   };
-  // Closing the window: give the game up to two seconds to save, then close for real.
+  // Never destroy a window containing unsaved work because a disk write was slow.
   const w = T() && T().window && T().window.getCurrentWindow && T().window.getCurrentWindow();
   if (w && w.onCloseRequested) {
     let closing = false;
@@ -42,8 +44,13 @@
       ev.preventDefault();
       if (closing) return; // already saving; the first request closes the window
       closing = true;
-      try { await settle(window.K28.flush(), 2000); } catch (err) { /* close anyway */ }
-      await w.destroy();
+      try {
+        await window.K28.flush();
+        await w.destroy();
+      } catch (err) {
+        closing = false;
+        window.alert(String(err.message || err));
+      }
     });
   }
 })();

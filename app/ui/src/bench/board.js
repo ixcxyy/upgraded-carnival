@@ -17,6 +17,7 @@ export class BoardView {
   set(info) {
     this.info = info;
     this.levels = null;
+    this.sizes = null;
     this.render();
   }
 

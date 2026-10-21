@@ -35,6 +35,9 @@ const S = {
   seeds: [1],
   seed: 1,
   saveTimers: new Map(),
+  saving: new Map(),
+  opening: 0,
+  resetting: false,
   suppress: false,
   traceStale: false,
   disasmStale: false,
@@ -68,7 +71,7 @@ function L() {
   return l;
 }
 function persist(now) {
-  S.bridge.persist(now);
+  return S.bridge.persist(now);
 }
 function P() {
   return S.bridge.profile();
@@ -342,7 +345,7 @@ async function open(id) {
   if (!ui) buildUi();
   const info = levelInfo(id);
   if (!info) { toast('There is no bench for task ' + id + '.'); return; }
-  if (S.task && S.task !== id) await switchAway();
+  if (S.task && S.task !== id && !(await switchAway())) return false;
   const same = S.task === id;
   S.task = id;
   S.info = info;
@@ -350,6 +353,7 @@ async function open(id) {
   ui.root.hidden = false;
   closeMenu();
   const t = TS();
+  applyLayout();
   S.seed = t.seed || 1;
   S.seeds = Array.from(new Set([1].concat(t.seeds || [], [S.seed])));
   renderHeader();
@@ -396,27 +400,50 @@ async function open(id) {
 
 /** Leaving one task for another: save, stop the debugger, close its files. */
 async function switchAway() {
-  await saveAll();
+  if (!(await saveAll())) return false;
   if (S.dbg) await dbgStop(true);
   for (const p of S.open.slice()) editor.close(p);
   S.open = [];
   S.lastRun = null;
   S.waveOf = null;
+  return true;
 }
 
 async function close() {
   closeMenu();
-  if (!ui || ui.root.hidden) return;
-  await saveAll();
+  if (!ui || ui.root.hidden) return true;
+  if (!(await saveAll())) return false;
   if (S.dbg) await dbgStop(true);
   if (S.task) {
     TS().open = S.open.slice();
     TS().active = editor.current();
   }
-  persist(true);
+  if ((await persist(true)) === false) return false;
   $('#app').classList.remove('benching');
   ui.root.hidden = true;
   S.bridge.refresh();
+  return true;
+}
+
+/** A profile owns the buffers as well as the saved layout, even for the same task ID. */
+async function reset() {
+  if (S.busy || S.opening || S.resetting) {
+    toast('Wait for the current workbench operation before changing profiles.');
+    return false;
+  }
+  S.resetting = true;
+  try {
+    if (!(await close()) || !(await switchAway())) return false;
+    for (const timer of S.saveTimers.values()) clearTimeout(timer);
+    S.saveTimers.clear();
+    Object.assign(S, { task: null, info: null, files: [], diags: {}, build: null,
+      lastRun: null, lastSubmit: null, waveOf: null, version: 0,
+      seeds: [1], seed: 1, traceStale: false, disasmStale: false });
+    S.bpTouched.clear();
+    return true;
+  } finally {
+    S.resetting = false;
+  }
 }
 
 function isOpen() {
@@ -549,7 +576,7 @@ async function renameFile(f) {
   const name = window.prompt('Rename ' + f.name + ' to:', f.name);
   if (!name || name.trim() === f.name) return;
   const to = dir + name.trim();
-  await saveFile(f.path);
+  if (!(await saveFile(f.path))) return;
   try {
     await call('ws_rename', { profile: P(), from: f.path, to });
   } catch (err) { toast(errText(err)); return; }
@@ -557,7 +584,7 @@ async function renameFile(f) {
   const bps = bench().bps[f.path];
   delete bench().bps[f.path];
   if (bps) bench().bps[to] = bps;
-  if (wasOpen) closeFile(f.path, true);
+  if (wasOpen) await closeFile(f.path, true);
   await refreshFiles();
   if (wasOpen) await openFile(to, true);
   persist();
@@ -567,11 +594,13 @@ async function deleteFile(f) {
   if (!window.confirm('Delete ' + f.path + '? This cannot be undone.')) return;
   const t = S.saveTimers.get(f.path);
   if (t) { clearTimeout(t); S.saveTimers.delete(f.path); }
+  // Let an already-dispatched autosave finish before deleting the file.
+  if (S.saving.has(f.path)) await S.saving.get(f.path);
   try {
     await call('ws_delete', { profile: P(), path: f.path });
   } catch (err) { toast(errText(err)); return; }
   delete bench().bps[f.path];
-  if (S.open.includes(f.path)) closeFile(f.path, true);
+  if (S.open.includes(f.path)) await closeFile(f.path, true);
   persist();
   await refreshFiles();
 }
@@ -606,8 +635,8 @@ async function openFile(path, show) {
   return true;
 }
 
-function closeFile(path, noSave) {
-  if (!noSave) saveFile(path);
+async function closeFile(path, noSave) {
+  if (!noSave && !(await saveFile(path))) return false;
   const i = S.open.indexOf(path);
   if (i < 0) return;
   S.open.splice(i, 1);
@@ -619,6 +648,7 @@ function closeFile(path, noSave) {
   persist();
   renderTabs();
   renderFiles();
+  return true;
 }
 
 function renderTabs() {
@@ -660,37 +690,59 @@ async function saveFile(path) {
   const t = S.saveTimers.get(path);
   if (t) clearTimeout(t);
   S.saveTimers.delete(path);
-  if (!editor.has(path) || !editor.isDirty(path)) return;
-  const text = editor.text(path);
-  if (text === null) return;
-  try {
-    await call('ws_write', { profile: P(), path, text });
-    if (editor.text(path) === text) editor.markSaved(path);
-  } catch (err) {
-    status('bad', 'Could not save ' + basename(path) + ': ' + errText(err));
-    return;
+  // A newer revision must never overtake a write already in flight.
+  const pending = S.saving.get(path);
+  if (pending) {
+    if (!(await pending)) return false;
+    return saveFile(path);
   }
+  if (!editor.has(path) || !editor.isDirty(path)) return true;
+  const text = editor.text(path);
+  if (text === null) return true;
+  const profile = P();
+  const write = (async () => {
+    try {
+      await call('ws_write', { profile, path, text });
+      if (P() === profile && editor.text(path) === text) editor.markSaved(path);
+      return true;
+    } catch (err) {
+      status('bad', 'Could not save ' + basename(path) + ': ' + errText(err));
+      return false;
+    }
+  })();
+  S.saving.set(path, write);
+  const ok = await write;
+  if (S.saving.get(path) === write) S.saving.delete(path);
   renderTabs();
   renderFiles();
+  // Typing can continue during a save. Flush that newer revision before a
+  // caller closes the tab, switches profiles, or compiles from disk.
+  if (ok && P() === profile && editor.isDirty(path)) return saveFile(path);
+  return ok;
 }
 
 async function saveAll() {
-  if (!editor) return;
+  if (!editor) return true;
   const paths = S.open.filter(p => editor.isDirty(p));
-  await Promise.all(paths.map(saveFile));
+  return (await Promise.all(paths.map(saveFile))).every(Boolean);
 }
 
 /** Pick up edits made outside the game (another editor) for files with no unsaved changes. */
 async function reloadFromDisk() {
-  if (!isOpen()) return;
+  if (!isOpen() || S.resetting) return;
+  const profile = P();
   for (const p of S.open.slice()) {
     if (editor.isDirty(p) || p.startsWith('sdk/')) continue;
+    const before = editor.state(p);
     try {
-      const r = await call('ws_read', { profile: P(), path: p });
+      const r = await call('ws_read', { profile, path: p });
+      // A focus-triggered read may finish after typing, closing/reopening the
+      // buffer, or changing profiles. Only refresh the exact clean snapshot.
+      if (P() !== profile || S.resetting || !editor.has(p) ||
+          editor.isDirty(p) || editor.state(p) !== before) continue;
       if (r.text !== editor.text(p)) {
         S.suppress = true;
-        editor.replace(p, r.text);
-        S.suppress = false;
+        try { editor.replace(p, r.text); } finally { S.suppress = false; }
         editor.markSaved(p);
         S.version++;
       }
@@ -698,7 +750,7 @@ async function reloadFromDisk() {
       // Deleted outside: leave the buffer; saving recreates it.
     }
   }
-  refreshFiles();
+  if (P() === profile && !S.resetting) refreshFiles();
 }
 
 // ───────────────────────── diagnostics and build output ─────────────────────────
@@ -784,11 +836,11 @@ async function waitJob(id) {
 }
 
 async function doBuild() {
-  if (S.busy || !S.task) return;
+  if (S.busy || S.resetting || !S.task) return;
   const task = S.task;
-  await saveAll();
   setBusy('build', 'Building…');
   try {
+    if (!(await saveAll())) return;
     const b = await call('build', { profile: P(), task });
     if (S.task !== task) return;
     showBuild(b);
@@ -806,15 +858,15 @@ async function doBuild() {
 
 /** Run one seed. opts: { seed, extra, keep (leave the Results tab alone), evidence (rule id to show) } */
 async function doRun(opts) {
-  if (S.busy || !S.task) return false;
+  if (S.busy || S.resetting || !S.task) return false;
   const o = opts || {};
-  await saveAll();
   const seed = o.seed === undefined ? S.seed : o.seed;
   const extra = o.extra === undefined ? ownOn() : !!o.extra;
   const task = S.task;
   setBusy('run', 'Building…');
   let ok = false;
   try {
+    if (!(await saveAll())) return false;
     const r = await call('run', { profile: P(), task, seed, extra });
     if (S.task !== task) return false;
     showBuild(r.build);
@@ -899,12 +951,12 @@ const resCtx = {
 };
 
 async function doSubmit() {
-  if (S.busy || !S.task) return;
-  await saveAll();
+  if (S.busy || S.resetting || !S.task) return;
   const extra = !ui.own.hidden;
   const task = S.task;
   setBusy('submit', 'Building…');
   try {
+    if (!(await saveAll())) return;
     const r = await call('submit', { profile: P(), task, extra });
     if (S.task === task) showBuild(r.build);
     if (!r.job) { if (S.task === task) failBuild(); return; }
@@ -1029,17 +1081,17 @@ function clearBps() {
 }
 
 async function doDebug() {
-  if (S.busy || !S.task) return;
+  if (S.busy || S.resetting || !S.task) return;
   if (S.dbg) {
     if (!S.dbg.running) dbgCmd('continue');
     return;
   }
-  await saveAll();
   const extra = ownOn();
   const task = S.task;
   const version = S.version;
   setBusy('debug', 'Building for the debugger…');
   try {
+    if (!(await saveAll())) return;
     const r = await call('dbg_start', { profile: P(), task, seed: S.seed, extra, breakpoints: allBps(), stop_at_main: true });
     if (S.task !== task) {
       if (r.ok) call('dbg_stop').catch(() => {});
@@ -1332,10 +1384,14 @@ window.Bench = {
     window.K28.beforeQuit(() => (editor ? saveAll() : null));
   },
   open(id) {
-    open(id).catch(err => toast(errText(err)));
+    if (S.resetting) return Promise.resolve(false);
+    S.opening++;
+    return open(id).catch(err => { toast(errText(err)); return false; })
+      .finally(() => { S.opening--; });
   },
   close() {
-    close().catch(() => {});
+    return close().catch(err => { toast(errText(err)); return false; });
   },
+  reset,
   isOpen,
 };

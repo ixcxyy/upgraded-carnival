@@ -51,7 +51,9 @@ export function renderRun(host, res, ctx) {
       h('span', { class: 'sub' },
         (sr.pass ? 'every rule holds' : plural(failing.length, 'rule') + ' of ' + sr.rules.length + ' broken') +
         ' · ' + fmtT(sr.end, 3) + ' of emulated time in ' + res.wall_ms + ' ms' + (res.extra ? ' · with your own check' : ''))),
-    sr.pass ? h('p', { class: 'dim' }, 'This was the visible seed only. Submitting runs the hidden seeds too: different button presses, different timing.') : null,
+    sr.pass ? h('p', { class: 'dim' }, sr.seed === 1
+      ? 'This was the visible seed only. Submitting runs the hidden seeds too: different button presses, different timing.'
+      : 'This was seed ' + sr.seed + ' only. Submitting checks the visible seed and every hidden seed.') : null,
     faultBox(sr, res.fault_loc, ctx),
     ruleList(sr, ctx, { extra: res.extra }),
     metrics(sr),

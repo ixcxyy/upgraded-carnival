@@ -309,44 +309,66 @@ async function readProfile(name) {
   applySettings();
   try { G.engine = new E.Engine(G.S, (blob && blob.save) || null); } catch (err) { G.engine = new E.Engine(G.S); }
   G.saveOk = null;
+  G.saving = false;
   renderSaved();
 }
 async function loadProfile(name) {
-  if (window.Bench) window.Bench.close();
   await readProfile(name);
   Object.assign(G.ui, { seen: {}, confirm: null, ticket: null, doc: null, draft: {}, own: {} });
   renderBrand();
   resetStream();
   after(false);
 }
+let profileChanging = false;
+async function changeProfile(action) {
+  if (profileChanging) return;
+  profileChanging = true;
+  try {
+    // Keep the old profile current until its buffers and save are durable.
+    if (window.Bench && !(await window.Bench.reset())) return;
+    if ((await persist(true)) === false) {
+      toast('Could not save this profile. Resolve the save error before changing profiles.');
+      return;
+    }
+    await action();
+  } catch (err) {
+    toast(String(err.message || err));
+  } finally {
+    profileChanging = false;
+  }
+}
 async function switchProfile(name) {
   if (name === G.profile) return;
-  persist(true);
-  await loadProfile(name);
-  closeSheet();
-  showTitle();
+  return changeProfile(async () => {
+    await loadProfile(name);
+    closeSheet();
+    showTitle();
+  });
 }
 async function createProfile(name) {
-  persist(true);
-  try { await window.K28.call('profile_create', { name }); } catch (err) { toast(String(err.message || err)); return; }
-  await refreshProfiles();
-  await loadProfile(name);
-  closeSheet();
-  showTitle();
+  return changeProfile(async () => {
+    await window.K28.call('profile_create', { name });
+    await refreshProfiles();
+    await loadProfile(name);
+    closeSheet();
+    showTitle();
+  });
 }
 async function deleteProfile() {
-  const gone = G.profile;
-  try { await window.K28.call('profile_delete', { profile: gone }); } catch (err) { toast(String(err.message || err)); return; }
-  await refreshProfiles();
-  let next = (G.profiles || []).find(n => n !== gone);
-  if (!next) {
-    next = 'Player 1';
-    try { await window.K28.call('profile_create', { name: next }); } catch (err) { /* exists */ }
+  return changeProfile(async () => {
+    const gone = G.profile;
+    await window.K28.call('profile_delete', { profile: gone });
     await refreshProfiles();
-  }
-  await loadProfile(next);
-  closeSheet();
-  showTitle();
+    let next = (G.profiles || []).find(n => n !== gone);
+    if (!next) {
+      next = 'Player 1';
+      await window.K28.call('profile_create', { name: next });
+      await refreshProfiles();
+    }
+    await loadProfile(next);
+    closeSheet();
+    showTitle();
+  });
 }
 function replayChapter(ch) {
   if (!G.engine.restoreChapter(ch)) return;

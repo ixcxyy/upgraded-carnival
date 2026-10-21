@@ -175,25 +175,44 @@ function saveBlob() {
   });
 }
 let saveTimer = 0;
+let savePending = Promise.resolve(true);
+let saveRevision = 0;
 function persist(now) {
   clearTimeout(saveTimer);
+  const revision = ++saveRevision;
+  G.saving = true;
+  renderSaved();
   const go = () => {
     saveTimer = 0;
-    if (!G.profile) return Promise.resolve();
-    return window.K28.call('save_write', { profile: G.profile, data: saveBlob() })
-      .then(() => { G.saveOk = true; G.saveErr = null; renderSaved(); })
-      .catch(err => { G.saveOk = false; G.saveErr = String((err && err.message) || err); renderSaved(); });
+    if (!G.profile) return savePending;
+    const profile = G.profile, data = saveBlob();
+    // The backend atomically renames one temp file per profile. Serialize
+    // requests so both that file and the newest snapshot have a single owner.
+    savePending = savePending.then(() => window.K28.call('save_write', { profile, data }))
+      .then(() => {
+        if (G.profile === profile && revision === saveRevision) {
+          G.saving = false; G.saveOk = true; G.saveErr = null; renderSaved();
+        }
+        return true;
+      })
+      .catch(err => {
+        if (G.profile === profile && revision === saveRevision) {
+          G.saving = false; G.saveOk = false; G.saveErr = String((err && err.message) || err); renderSaved();
+        }
+        return false;
+      });
+    return savePending;
   };
   if (now) return go();
   saveTimer = setTimeout(go, 400);
   return Promise.resolve();
 }
-/* Before the window closes: write a pending save now. */
-window.K28.beforeQuit(() => (saveTimer ? persist(true) : null));
+/* A dispatched write matters just as much as a pending debounce timer. */
+window.K28.beforeQuit(() => (saveTimer ? persist(true) : savePending));
 function renderSaved() {
   const el = $('#saved');
   if (!el) return;
-  el.textContent = G.saveOk === false ? 'Not saving: ' + (G.saveErr || 'error') : G.saveOk ? 'Saved' : '';
+  el.textContent = G.saving ? 'Saving…' : G.saveOk === false ? 'Not saving: ' + (G.saveErr || 'error') : G.saveOk ? 'Saved' : '';
   el.classList.toggle('bad', G.saveOk === false);
 }
 
