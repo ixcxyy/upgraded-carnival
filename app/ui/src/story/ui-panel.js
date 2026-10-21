@@ -7,7 +7,24 @@ function currentTab() {
 function showTab(tab) {
   G.ui.tab = tab;
   if (isNarrow()) setView(tab);
-  else { renderPanel(); updateBadges(); }
+  else { setPanelOpen(true); renderPanel(); updateBadges(); }
+}
+/* The rail: picking a destination opens the panel on it; picking the open one again folds it away. */
+function railClick(tab) {
+  if (!isNarrow() && G.ui.tab === tab && G.settings.panel !== 'closed') { setPanelOpen(false); return; }
+  G.ui.tab = tab;
+  setPanelOpen(true);
+  renderPanel();
+  updateBadges();
+}
+function setPanelOpen(open) {
+  const want = open ? 'open' : 'closed';
+  const changed = G.settings.panel !== want;
+  G.settings.panel = want;
+  $('#app').classList.toggle('panel-closed', !open);
+  if (changed) { persist(); setTimeout(() => G.railInd && G.railInd.refresh(), 340); }
+  const pc = $('#panel-close');
+  if (pc) pc.setAttribute('aria-expanded', String(open));
 }
 function setView(v) {
   G.ui.view = v;
@@ -30,8 +47,17 @@ function openDoc(id) {
 function renderPanel() {
   const body = $('#panel-body');
   const tab = currentTab();
-  $$('#panel-tabs .tab').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
+  $$('#panel-tabs .rail-btn').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
   $$('#mtabs .tab').forEach(b => b.setAttribute('aria-selected', String(b.dataset.view === G.ui.view)));
+  const titles = { work: ['work', 'Work order'], board: ['case', 'Case board'], codex: ['codex', 'Codex'] };
+  const t = titles[tab] || titles.work;
+  put($('#panel-title'), ic(t[0]), t[1]);
+  if (window.SN) {
+    if (!G.railInd) G.railInd = window.SN.indicator($('#panel-tabs'));
+    if (!G.mInd) G.mInd = window.SN.indicator($('#mtabs'));
+    G.railInd.move($('#panel-tabs .rail-btn[aria-selected="true"]'));
+    G.mInd.move($('#mtabs .tab[aria-selected="true"]'));
+  }
   const key = tab + ':' + (tab === 'work' ? G.ui.ticket : tab === 'codex' ? G.ui.codex + ':' + G.ui.doc : '');
   const keep = G.ui.keep === key ? body.scrollTop : 0;
   body.replaceChildren(tab === 'work' ? workView() : tab === 'board' ? boardView() : codexView());
@@ -75,48 +101,74 @@ function workView() {
   const st = G.engine.state, S = G.S;
   const wrap = h('div');
   if (!st.taskOrder.length) {
-    wrap.append(h('h2', { class: 'ph' }, 'Work in hand'), h('p', { class: 'empty' }, 'Nothing yet. Lab sheets, the exam and work orders land here when someone hands them over.'));
+    wrap.append(h('div', { class: 'empty' }, ic('work'), 'Nothing in hand yet. Lab sheets, the exam and work orders land here when someone hands them over.'));
     return wrap;
   }
   const active = st.wait && st.wait.type === 'task' ? st.wait.id : null;
   const cur = G.ui.ticket && st.tasks[G.ui.ticket] ? G.ui.ticket : (active || st.taskOrder[st.taskOrder.length - 1]);
-  wrap.append(h('h2', { class: 'ph' }, 'Issued so far'),
+  wrap.append(h('h3', { class: 'ph' }, 'Issued so far'),
     h('div', { class: 'tix', role: 'group', 'aria-label': 'Issued so far' }, st.taskOrder.map(id => {
       const T = S.tasks[id];
       const n = String(T.code).match(/\d+/);
       const label = T.form === 'workorder' ? T.title : T.form === 'exam' ? 'Exam' : 'Lab ' + (n ? n[0] : id);
-      return h('button', { type: 'button', 'aria-pressed': String(id === cur), class: st.tasks[id].status === 'active' ? 'live' : '', onclick: () => { G.ui.ticket = id; renderPanel(); } }, fill(label));
+      return h('button', { type: 'button', 'aria-pressed': String(id === cur), class: st.tasks[id].status === 'active' ? 'live' : st.tasks[id].status === 'passed' ? 'passed' : '', onclick: () => { G.ui.ticket = id; renderPanel(); } }, fill(label));
     })));
   wrap.append(ticketEl(cur));
   return wrap;
 }
 function field(k, v, cls) { return h('div', { class: 'field ' + (cls || '') }, h('span', { class: 'k' }, k), h('span', { class: 'v' }, v)); }
 function sec(title, ...kids) { return h('section', { class: 'sec' }, h('h4', null, title), ...kids); }
+/* Secondary sections fold away; what the checker requires never does. */
+function fold(title, open, ...kids) {
+  return h('details', { class: 'sec', open: open || null }, h('summary', null, ic('chev-right', { size: 13 }), title), ...kids);
+}
+function levelOf(id) {
+  const i = G.init && G.init.levels;
+  return i ? i.find(l => l.id === id) || null : null;
+}
+/* The pins as the level defines them (pin, label, direction, note): drawn from data, nothing invented. */
+function pinMap(id) {
+  const L = levelOf(id);
+  if (!L || !L.pins || !L.pins.length) return null;
+  const rows = [];
+  for (const p of L.pins) {
+    rows.push(h('span', { class: 'chip-side' }, p.name),
+      h('span', { class: 'wire ' + (p.dir === 'in' ? 'in' : 'out'), 'aria-hidden': 'true' }),
+      h('span', { class: 'dest' }, h('b', null, p.label), h('span', { class: 'dir' }, p.dir === 'in' ? 'in, driven by the board' : 'out, driven by the chip'), p.note ? h('span', { class: 'note' }, p.note) : null));
+  }
+  return h('div', null, h('div', { class: 'pinmap', role: 'table', 'aria-label': 'Pin map' }, rows),
+    h('p', { class: 'pinmap-cap' }, fill(G.S.meta.mcu || 'K28') + ' pins on the left; arrows show which side drives the line.'));
+}
 
 function ticketEl(id, inBench) {
   const e = G.engine, S = G.S, T = S.tasks[id], ts = e.state.tasks[id] || { status: 'active', fails: 0, hints: 0, extra: false };
   e.seeTask(id);
   const head = T.form === 'workorder' ? fill(S.meta.firm || '') + ' · Work order' : T.form === 'exam' ? 'Examination' : 'Lab sheet';
   const el = h('article', { class: 'ticket form-' + T.form, 'aria-label': fill(T.title) });
-  el.append(h('div', { class: 'ticket-head' }, h('span', { class: 'firm' }, head), h('span', null, fill(T.code))));
-  el.append(h('div', { class: 'ticket-title' }, h('span', { class: 'name' }, fill(T.title)), T.rev ? h('span', null, 'rev ' + T.rev) : null));
+  const passed = ts.status === 'passed';
+  el.append(h('div', { class: 'ticket-head' }, h('span', { class: 'firm' }, ic(T.form === 'exam' ? 'flag' : 'work'), head),
+    h('span', { class: 'code' }, fill(T.code))));
+  el.append(h('div', { class: 'ticket-title' }, h('span', { class: 'name', 'data-task-title': inBench ? null : id }, fill(T.title)),
+    passed ? h('span', { class: 'chip stamp' }, ic('check'), T.form === 'exam' ? 'Handed in' : T.form === 'lab' ? 'Passed' : 'Closed')
+      : ts.fails ? h('span', { class: 'chip warn' }, plural(ts.fails, 'failed submission')) : h('span', { class: 'chip live' }, 'Open'),
+    T.rev ? h('span', { class: 'rev' }, 'rev ' + T.rev) : null));
+  if (T.brief) el.append(h('p', { class: 'summary' }, rich(T.brief)));
   const fields = [field('Board', fill(T.board), 'wide')];
   if (T.form === 'workorder') {
-    fields.push(field('Issued by', fill(S.meta.handler || '')), field('Status', ts.status === 'passed' ? 'Closed' : 'Open'), field('Purpose', '', 'wide purpose'));
+    fields.push(field('Issued by', fill(S.meta.handler || '')), field('Status', passed ? 'Closed' : 'Open'), field('Purpose', '', 'wide purpose'));
   }
   el.append(h('div', { class: 'fields' }, fields));
-  if (T.brief) el.append(sec(T.form === 'workorder' ? 'Summary' : 'Task', h('p', { class: 'prose' }, rich(T.brief))));
-  if (T.behavior.length) el.append(sec('Required behaviour', h('ul', null, T.behavior.map(l => h('li', null, rich(l))))));
-  if (T.schematic.length) el.append(sec(T.form === 'workorder' ? 'Interfaces' : 'Board', h('pre', { class: 'schem' }, T.schematic.map(fill).join('\n'))));
-  if (T.rules.length) el.append(sec('Acceptance', h('ul', null, T.rules.map(l => h('li', null, rich(l))))));
-  if (T.datasheet.length) el.append(sec('Datasheet excerpt', T.datasheet.map(l => h('p', null, fill(l)))));
+  if (T.behavior.length) el.append(h('section', { class: 'sec req' }, h('h4', null, ic('flag', { size: 13 }), 'Required behaviour'), h('ul', null, T.behavior.map(l => h('li', null, rich(l))))));
+  if (T.rules.length) el.append(h('section', { class: 'sec req' }, h('h4', null, ic('results', { size: 13 }), 'Acceptance'), h('ul', null, T.rules.map(l => h('li', null, rich(l))))));
+  const pm = pinMap(id);
+  if (T.schematic.length || pm) {
+    el.append(sec(T.form === 'workorder' ? 'Interfaces' : 'Board', pm, T.schematic.length ? h('pre', { class: 'schem' }, T.schematic.map(fill).join('\n')) : null));
+  }
   if (T.capture) el.append(sec('Capture', captureEl(T)));
-  if (T.parts) el.append(sec('Parts list', h('p', null, rich(T.parts))));
-  if (T.remark) el.append(sec('Remark', h('p', { class: 'remark' }, fill(T.remark))));
   if (T.provided) el.append(sec('Provided', h('p', null, fill(T.provided))));
-  if (T.driver) el.append(sec(T.form === 'workorder' ? 'Driver contract' : 'Goes into your library', h('p', null, h('b', null, fill(driverName(T.driver))), driverWhat(T.driver) ? ' — ' + fill(driverWhat(T.driver)) : '')));
+  if (T.driver) el.append(sec(T.form === 'workorder' ? 'Driver contract' : 'Goes into your library', h('p', null, h('code', { class: 'mono' }, fill(driverName(T.driver))), driverWhat(T.driver) ? ' — ' + fill(driverWhat(T.driver)) : '')));
   const extras = e.extraFor(id);
-  if (extras.length) el.append(sec('Your own check', extras.map(x => h('p', { class: 'own' }, fill(x.text)))));
+  if (extras.length) el.append(h('section', { class: 'sec' }, h('h4', null, 'Your own check', h('span', { class: 'optional' }, 'optional')), extras.map(x => h('p', { class: 'own' }, fill(x.text)))));
   const said = T.hints.slice(0, ts.hints);
   if (said.length) {
     el.append(sec('Around the bench', said.map((x, i) => {
@@ -125,7 +177,10 @@ function ticketEl(id, inBench) {
       return h('p', { class: 'said' }, h('span', { class: 'who' }, x.who || ''), aside ? h('span', { class: 'aside' }, '(' + aside + ') ') : null, fill(rest));
     })));
   }
-  if (!inBench) el.append(ts.status === 'passed' ? passedRow(T, ts) : heldBox(T, ts, extras));
+  if (T.datasheet.length) el.append(fold('Datasheet excerpt', false, T.datasheet.map(l => h('p', { class: 'mono', style: 'font-size:0.8rem' }, fill(l)))));
+  if (T.parts) el.append(fold('Parts list', false, h('p', null, rich(T.parts))));
+  if (T.remark) el.append(fold('Remark', true, h('p', { class: 'remark' }, fill(T.remark))));
+  if (!inBench) el.append(passed ? passedRow(T, ts) : heldBox(T, ts, extras));
   return el;
 }
 
@@ -138,7 +193,7 @@ function heldBox(T, ts, extras) {
   const next = E.HINT_AT[Math.min(ts.hints, E.HINT_AT.length - 1)];
   const last = benchLast(id);
   const box = h('div', { class: 'held' },
-    h('div', { class: 'held-h' }, T.form === 'exam' ? 'Exam bench' : 'On the bench'),
+    h('div', { class: 'held-h' }, ic('board'), T.form === 'exam' ? 'Exam bench' : 'On the bench'),
     h('p', null, T.form === 'exam'
       ? 'Write it from scratch: your library stays in your bag. Run it on the exam board as often as you like, then hand it in.'
       : 'Write the C, run it on the emulated ' + fill(G.S.meta.mcu || 'chip') + ' and watch the pins, debug it line by line, and submit it when it behaves. Submitting runs hidden seeds as well.'),
@@ -147,15 +202,15 @@ function heldBox(T, ts, extras) {
       ts.fails ? plural(ts.fails, 'failed submission') + '.' : 'Nothing submitted yet.',
       ts.hints < T.hints.length ? ' Someone steps in once ' + next + ' submissions have failed.' : ' Every hint for this one is out.'),
     extras.length ? h('p', { class: 'runs' }, 'Your own check runs too when you submit. It only adds: the task passes without it.') : null);
-  box.append(h('div', { class: 'row' }, btn(T.form === 'exam' ? 'Open the exam bench' : 'Open the workbench', 'primary small', () => window.Bench.open(id))));
+  box.append(h('div', { class: 'row' }, btn(T.form === 'exam' ? 'Open the exam bench' : 'Open the workbench', 'primary', ev => openBench(id, ev.currentTarget), null, 'board')));
   return box;
 }
 function passedRow(T, ts) {
   return h('div', { class: 'passed-row' },
-    h('span', { class: 'chip stamp' }, T.form === 'exam' ? 'Handed in' : T.form === 'lab' ? 'Passed' : 'Satisfactory'),
+    h('span', { class: 'chip stamp' }, ic('check'), T.form === 'exam' ? 'Handed in' : T.form === 'lab' ? 'Passed' : 'Satisfactory'),
     h('span', null, ts.fails ? 'after ' + plural(ts.fails, 'failed submission') : 'first submission'),
     ts.extra ? h('span', null, '· with your own check') : null,
-    btn('Open the workbench', 'link', () => window.Bench.open(T.id)));
+    btn('Open the workbench', 'link', ev => openBench(T.id, ev.currentTarget)));
 }
 
 /* ── case board: Elias's notebook ── */
@@ -188,16 +243,17 @@ function boardView() {
     return pad;
   }
   for (const q of B.questions) {
-    pad.append(h('section', { class: 'q' }, h('h3', null, fill(q.question)), q.hyps.map(x =>
+    pad.append(h('section', { class: 'q' }, h('h3', null, ic('case'), fill(q.question)), q.hyps.map(x =>
       h('div', { class: 'hyp ' + x.status + (x.leading ? ' leading' : '') },
         h('div', { class: 'line1' },
-          h('span', { class: 't' }, fill(x.text)),
+          h('span', { class: 't' }, h('span', { class: 'tx' }, fill(x.text)),
+            x.leading ? h('span', { class: 'state' }, 'ahead on evidence') : x.status === 'demoted' ? h('span', { class: 'state' }, 'ruled out') : null),
           h('span', { class: 'ev', role: 'img', 'aria-label': x.pro.length + ' for, ' + x.con.length + ' against' }, dots(x.pro.length, 'pro'), dots(x.con.length, ''))),
         pinList(x.pro.map(id => ({ id, con: false })).concat(x.con.map(id => ({ id, con: true }))), x.id)))));
   }
   if (B.loose.length) pad.append(h('section', { class: 'q' }, h('h3', null, 'Loose ends'), pinList(B.loose.map(id => ({ id, con: false })), 'loose')));
   if (B.noise.length) pad.append(h('section', { class: 'q' }, h('h3', null, 'Noise'), pinList(B.noise.map(id => ({ id, con: false })), 'noise')));
-  pad.append(h('p', { class: 'board-leg' }, 'Filled dot: supports. Hollow dot: weakens. Underlined: ahead on evidence. Struck through: ruled out, still readable.'));
+  pad.append(h('p', { class: 'board-leg' }, 'Filled dot, +: supports. Hollow dot, −: weakens. Counts are the details you followed up, nothing more. Struck through: ruled out, still readable.'));
   return pad;
 }
 
@@ -207,13 +263,15 @@ function codexView() {
   const met = S.order.people.filter(id => st.met[id]);
   const seenClues = st.seenOrder.filter(id => S.clues[id] && (st.clues[id].noticed || st.chapters[S.clues[id].chapter] === 'done'));
   const tabs = [
-    ['people', 'People', met.length], ['docs', 'Documents', st.docOrder.length], ['clues', 'Clues', seenClues.length],
-    ['places', 'Places', st.placeOrder.length], ['devices', 'Devices', st.devices.length], ['library', 'Library', st.library.length],
+    ['people', 'People', met.length, 'people'], ['docs', 'Documents', st.docOrder.length, 'doc'], ['clues', 'Clues', seenClues.length, 'clue'],
+    ['places', 'Places', st.placeOrder.length, 'place'], ['devices', 'Devices', st.devices.length, 'chip'], ['library', 'Library', st.library.length, 'library'],
   ];
   if (G.ui.doc && G.ui.codex === 'docs') return readerView(G.ui.doc);
   const wrap = h('div');
-  wrap.append(h('div', { class: 'subtabs', role: 'tablist', 'aria-label': 'Codex' }, tabs.map(([k, label, n]) =>
-    h('button', { class: 'subtab', role: 'tab', type: 'button', 'aria-selected': String(G.ui.codex === k), onclick: () => { G.ui.codex = k; G.ui.doc = null; renderPanel(); } }, label, h('span', { class: 'n' }, String(n))))));
+  const strip = h('div', { class: 'subtabs', role: 'tablist', 'aria-label': 'Codex' }, tabs.map(([k, label, n, icn]) =>
+    h('button', { class: 'subtab', role: 'tab', type: 'button', 'aria-selected': String(G.ui.codex === k), onclick: () => { G.ui.codex = k; G.ui.doc = null; renderPanel(); } }, ic(icn), label, h('span', { class: 'n' }, String(n)))));
+  wrap.append(strip);
+  if (window.SN) requestAnimationFrame(() => { if (strip.isConnected) window.SN.indicator(strip).move($('[aria-selected="true"]', strip), true); });
   const k = G.ui.codex;
   if (k === 'people') {
     for (const id of met) {
@@ -223,11 +281,11 @@ function codexView() {
         notes.length ? h('ul', { class: 'notes' }, notes.map(n => h('li', null, fill(n.text)))) : null));
     }
   } else if (k === 'docs') {
-    if (!st.docOrder.length) wrap.append(h('p', { class: 'empty' }, 'No documents yet. Chapters unlock them when they end.'));
+    if (!st.docOrder.length) wrap.append(h('div', { class: 'empty' }, ic('doc'), 'No documents yet. Chapters unlock them when they end.'));
     wrap.append(h('div', { class: 'doclist' }, st.docOrder.map(id => {
       const D = S.docs[id];
       return h('button', { type: 'button', class: st.docs[id].read ? '' : 'unread', onclick: () => openDoc(id) },
-        h('span', { class: 't' }, fill(D.title)), h('span', { class: 'k' }, fill(D.kind)), D.from ? h('span', { class: 'f' }, fill(D.from)) : null);
+        h('span', { class: 'di' }, ic('doc')), h('span', { class: 't' }, fill(D.title)), h('span', { class: 'k' }, fill(D.kind)), D.from ? h('span', { class: 'f' }, fill(D.from)) : null);
     })));
   } else if (k === 'clues') {
     wrap.append(clueListView(seenClues));
@@ -239,7 +297,7 @@ function codexView() {
         notes.length ? h('ul', { class: 'notes' }, notes.map(n => h('li', null, fill(n.text)))) : null));
     }
   } else if (k === 'devices') {
-    if (!st.devices.length) wrap.append(h('p', { class: 'empty' }, 'Every board you touch ends up here.'));
+    if (!st.devices.length) wrap.append(h('div', { class: 'empty' }, ic('chip'), 'Every board you touch ends up here.'));
     else {
       wrap.append(h('div', { class: 'tablewrap' }, h('table', { class: 'devtable' },
         h('thead', null, h('tr', null, h('th', null, 'Board'), h('th', null, 'From'), h('th', null, 'Notes'))),
@@ -249,7 +307,7 @@ function codexView() {
         })))));
     }
   } else if (k === 'library') {
-    if (!st.library.length) wrap.append(h('p', { class: 'empty' }, 'Drivers you pass are committed here, and later work links against them.'));
+    if (!st.library.length) wrap.append(h('div', { class: 'empty' }, ic('library'), 'Drivers you pass are committed here, and later work links against them.'));
     wrap.append(h('ul', { class: 'lib' }, st.library.map(x => {
       const T = S.tasks[x.task];
       return h('li', null, h('code', null, fill(driverName(x.driver))), h('span', { class: 'd' }, fill(driverWhat(x.driver))), h('span', { class: 'from' }, fill(T ? T.code + ' · ' + T.title : x.task)));
@@ -262,7 +320,7 @@ function clueListView(ids) {
   const e = G.engine, st = e.state, S = G.S;
   const wrap = h('div', { class: 'cluelist' });
   if (!ids.length) {
-    wrap.append(h('p', { class: 'empty' }, 'Details you stop on are listed here. When a chapter ends, so is everything you walked past.'));
+    wrap.append(h('div', { class: 'empty' }, ic('clue'), 'Details you stop on are listed here. When a chapter ends, so is everything you walked past.'));
     return wrap;
   }
   for (const ch of S.chapters) {
@@ -272,8 +330,9 @@ function clueListView(ids) {
     for (const id of mine) {
       const cs = st.clues[id];
       const label = cs.followed === 'asked' ? 'Asked' : cs.followed === 'noted' ? 'Noted' : cs.letgo ? 'Let go' : cs.noticed ? 'Noticed' : 'Walked past';
+      const icn = cs.followed === 'asked' ? 'message' : cs.followed === 'noted' ? 'note' : cs.letgo ? 'letgo' : cs.noticed ? 'clue' : 'dot';
       wrap.append(h('div', { class: 'cl' + (cs.followed ? ' f' : '') },
-        h('span', { class: 's' }, label),
+        h('span', { class: 's' }, ic(icn), label),
         h('span', { class: 'o' }, cs.noticed ? fill(cs.obs || e.observation(id)) : '', cs.text ? h('span', { class: 'src' }, '“' + fill(cs.text) + '”') : null)));
     }
   }
@@ -283,7 +342,7 @@ function clueListView(ids) {
 function readerView(id) {
   const D = G.S.docs[id];
   const wrap = h('div', { class: 'reader' });
-  wrap.append(btn('All documents', 'ghost small back', () => { G.ui.doc = null; renderPanel(); }));
+  wrap.append(btn('All documents', 'ghost small back', () => { G.ui.doc = null; renderPanel(); }, null, 'back'));
   const paper = h('article', { class: 'docpaper kind-' + slug(D.kind || 'doc') },
     h('div', { class: 'k' }, fill(D.kind)),
     h('h3', null, fill(D.title)),

@@ -1,39 +1,47 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Signal / Noise</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <div class="app" id="app" data-view="story">
   <header class="topbar">
-    <button class="brand" id="brand" type="button" aria-label="Title screen">SIGNAL / NOISE</button>
+    <button class="brand" id="brand" type="button" aria-label="Title screen" data-tip="Title screen" data-tip-at="below"><span class="brand-mark" aria-hidden="true"></span><span class="brand-word" id="brand-word">SIGNAL / NOISE</span></button>
     <div class="where" id="where"></div>
-    <span class="saved" id="saved"></span>
-    <button class="btn ghost small" id="menu-btn" type="button">Menu</button>
+    <div class="top-right">
+      <span class="saved" id="saved" role="status"></span>
+      <button class="profile-chip" id="profile-btn" type="button" data-tip="Profiles, saves and settings" data-tip-at="below"><span data-icon="profile"></span><span class="pn" id="profile-name"></span></button>
+      <button class="ibtn" id="menu-btn" type="button" aria-label="Menu" data-tip="Menu: settings, saves, author tools" data-tip-at="below"><span data-icon="settings"></span></button>
+    </div>
   </header>
   <div class="main">
     <section class="story" aria-label="Story">
       <div class="stream" id="stream"><div class="stream-inner" id="stream-inner" role="log" aria-live="polite"></div></div>
-      <div class="dock"><div class="dock-inner" id="dock-inner"></div></div>
+      <div class="dock"><div class="dock-inner glass" id="dock-inner"></div></div>
     </section>
-    <aside class="panel" aria-label="Work order, case board and codex">
-      <nav class="tabs" id="panel-tabs" role="tablist" aria-label="Panel">
-        <button class="tab" role="tab" type="button" data-tab="work">Work order<span class="dot" hidden></span></button>
-        <button class="tab" role="tab" type="button" data-tab="board">Case board<span class="dot" hidden></span></button>
-        <button class="tab" role="tab" type="button" data-tab="codex">Codex<span class="dot" hidden></span></button>
-      </nav>
-      <div class="panel-body" id="panel-body"></div>
+    <aside class="panel" id="panel" aria-label="Work order, case board and codex">
+      <div class="panel-head">
+        <h2 class="panel-title" id="panel-title"></h2>
+        <button class="ibtn sm" id="panel-close" type="button" aria-label="Hide the side panel" data-tip="Hide the side panel" data-tip-at="below"><span data-icon="panel-right"></span></button>
+      </div>
+      <div class="panel-body" id="panel-body" role="tabpanel"></div>
     </aside>
+    <nav class="rail" id="panel-tabs" role="tablist" aria-label="Notebook" aria-orientation="vertical">
+      <button class="rail-btn" role="tab" type="button" data-tab="work" aria-label="Work order" data-tip="Work order"><span data-icon="work"></span><span class="rl">Work</span><span class="dot" hidden></span></button>
+      <button class="rail-btn" role="tab" type="button" data-tab="board" aria-label="Case board" data-tip="Case board"><span data-icon="case"></span><span class="rl">Case</span><span class="dot" hidden></span></button>
+      <button class="rail-btn" role="tab" type="button" data-tab="codex" aria-label="Codex" data-tip="Codex"><span data-icon="codex"></span><span class="rl">Codex</span><span class="dot" hidden></span></button>
+    </nav>
   </div>
   <div class="bench" id="bench" hidden></div>
   <nav class="mtabs" id="mtabs" aria-label="Views">
-    <button class="tab" type="button" data-view="story">Story</button>
-    <button class="tab" type="button" data-view="work">Work<span class="dot" hidden></span></button>
-    <button class="tab" type="button" data-view="board">Board<span class="dot" hidden></span></button>
-    <button class="tab" type="button" data-view="codex">Codex<span class="dot" hidden></span></button>
+    <button class="tab" type="button" data-view="story"><span data-icon="doc"></span><span>Story</span></button>
+    <button class="tab" type="button" data-view="work"><span data-icon="work"></span><span>Work</span><span class="dot" hidden></span></button>
+    <button class="tab" type="button" data-view="board"><span data-icon="case"></span><span>Case</span><span class="dot" hidden></span></button>
+    <button class="tab" type="button" data-view="codex"><span data-icon="codex"></span><span>Codex</span><span class="dot" hidden></span></button>
   </nav>
 </div>
 <div class="title" id="title"><div class="title-inner" id="title-inner"></div></div>
@@ -41,6 +49,7 @@
 
 <!--STORY-->
 
+<script src="ui.js"></script>
 <script src="api.js"></script>
 <script src="bench.js"></script>
 <script src="story.js"></script>

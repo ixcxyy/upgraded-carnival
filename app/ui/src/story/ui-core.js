@@ -2,13 +2,15 @@
 const E = window.StoryEngine;
 const L = window.StoryLedger;
 const KEY = 'signal-noise.active-profile';
-const REDUCED = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+/* Shared primitives (icons, motion, dialogs) live in ui.js as window.SN; read them at call time. */
+const SNX = () => window.SN;
+function reducedMotion() { return SNX() ? SNX().motion.reduced() : true; }
 
 const G = {
   S: null, engine: null,
   files: null, builtin: null, custom: false,
   db: null, profile: 'Player 1',
-  settings: { casual: false, size: 'm' },
+  settings: { casual: false, size: 'm', theme: 'dark', motion: 'system', panel: 'open' },
   ui: {
     tab: 'work', codex: 'people', view: 'story', ticket: null, doc: null,
     draft: {}, own: {}, rendered: 0, lastN: 0, seen: {}, sheet: null, confirm: null, keep: null,
@@ -56,8 +58,14 @@ function put(el, ...kids) {
   appendKids(el, kids);
   return el;
 }
-function btn(label, cls, onclick, extra) {
-  return h('button', Object.assign({ type: 'button', class: 'btn ' + (cls || ''), onclick }, extra || {}), label);
+function btn(label, cls, onclick, extra, iconName) {
+  return h('button', Object.assign({ type: 'button', class: 'btn ' + (cls || ''), onclick }, extra || {}), iconName ? ic(iconName) : null, label);
+}
+function ic(name, opts) { return SNX() ? SNX().icon(name, opts) : null; }
+/* An icon-only control: it always carries its name for assistive tech and a tooltip with the shortcut. */
+function ibtn(name, label, onclick, extra) {
+  const x = extra || {};
+  return h('button', Object.assign({ type: 'button', class: 'ibtn ' + (x.cls || ''), onclick, 'aria-label': label, 'data-tip': label, 'data-kbd': x.kbd || null, 'aria-keyshortcuts': x.keys || null }, x.attrs || {}), ic(name, x.icon));
 }
 function linkBtn(label, onclick) { return btn(label, 'link', onclick); }
 function slug(s) { return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'x'; }
@@ -212,17 +220,27 @@ window.K28.beforeQuit(() => (saveTimer ? persist(true) : savePending));
 function renderSaved() {
   const el = $('#saved');
   if (!el) return;
-  el.textContent = G.saving ? 'Saving…' : G.saveOk === false ? 'Not saving: ' + (G.saveErr || 'error') : G.saveOk ? 'Saved' : '';
-  el.classList.toggle('bad', G.saveOk === false);
+  const kind = G.saving ? 'busy' : G.saveOk === false ? 'bad' : G.saveOk ? 'ok' : '';
+  const text = G.saving ? 'Saving…' : G.saveOk === false ? 'Not saving' : G.saveOk ? 'Saved' : '';
+  el.className = 'saved ' + kind;
+  if (G.saveOk === false) { el.setAttribute('data-tip', 'Progress is not being saved: ' + (G.saveErr || 'error')); el.setAttribute('tabindex', '0'); }
+  else { el.removeAttribute('data-tip'); el.removeAttribute('tabindex'); }
+  put(el, kind ? ic(kind === 'busy' ? 'spinner' : kind === 'bad' ? 'alert' : 'check', { class: kind === 'busy' ? 'rot' : '' }) : null, h('span', { class: 'txt' }, text),
+    G.saveOk === false ? h('span', { class: 'sr' }, ': ' + (G.saveErr || 'error')) : null);
 }
 
 let toastTimer = 0;
-function toast(msg) {
+function toast(msg, iconName) {
   const el = $('#toast');
-  el.textContent = msg;
+  const wasHidden = el.hidden;
+  put(el, ic(iconName || 'info'), h('span', null, msg));
   el.hidden = false;
+  if (wasHidden && SNX()) SNX().motion.animate(el, [{ opacity: 0, transform: 'translate(-50%, 10px) scale(0.97)' }, { opacity: 1, transform: 'translate(-50%, 0)' }], { dur: 280, ease: SNX().motion.EASE.spring, key: 'toast' });
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 2800);
+  toastTimer = setTimeout(() => {
+    const done = () => { el.hidden = true; };
+    if (SNX()) SNX().motion.animate(el, [{ opacity: 1 }, { opacity: 0, transform: 'translate(-50%, 6px)' }], { dur: 160, key: 'toast' }).then(ok => { if (ok) done(); }); else done();
+  }, 3200);
 }
 
 

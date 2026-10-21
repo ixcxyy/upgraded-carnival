@@ -3,7 +3,7 @@
 function line(cls, who, ...content) {
   return h('div', { class: 'line ' + cls }, h('div', { class: 'who' }, who || ''), h('div', { class: 'txt' }, ...content));
 }
-function sysLine(who, content) { return line('sys', who, content); }
+function sysLine(who, content, iconName) { return line('sys', who, h('span', { class: 'sysrow' }, ic(iconName || 'dot'), content)); }
 
 function renderEntry(en, live) {
   const S = G.S;
@@ -20,7 +20,7 @@ function renderEntry(en, live) {
       return h('div', { class: 'loc' + (en.again ? ' again' : '') + (en.cut ? ' cut' : '') },
         h('div', { class: 'rule' }),
         h('div', { class: 'txt' },
-          h('span', { class: 'place' }, (en.again ? 'Back · ' : '') + fill(en.text)),
+          h('span', { class: 'place' }, en.again ? null : ic('place'), (en.again ? 'Back · ' : '') + fill(en.text)),
           P && !en.again && !en.cut ? h('span', { class: 'kind' }, fill(P.type)) : null));
     }
     case 'narr': return line('narr' + f, '', rich(en.text, live));
@@ -34,12 +34,12 @@ function renderEntry(en, live) {
     case 'board': return boardLines(en);
     case 'doc': {
       const D = S.docs[en.id];
-      return sysLine('Documents', [fill(D.title) + ' ', linkBtn('Read it', () => openDoc(en.id))]);
+      return sysLine('Documents', [fill(D.title) + ' ', linkBtn('Read it', () => openDoc(en.id))], 'doc');
     }
-    case 'device': return sysLine('Devices', fill(S.devices[en.id].name));
+    case 'device': return sysLine('Devices', fill(S.devices[en.id].name), 'chip');
     case 'place': {
       const P = S.places[en.id];
-      return sysLine('Places', fill(P.name) + (P.type ? ' · ' + fill(P.type) : ''));
+      return sysLine('Places', fill(P.name) + (P.type ? ' · ' + fill(P.type) : ''), 'place');
     }
     case 'note': {
       const who = en.who ? (S.people[en.who] ? S.people[en.who].short : en.who) : (S.places[en.place] ? S.places[en.place].name : '');
@@ -67,22 +67,22 @@ function sayLine(en, live) {
   if (aside && /notebook/i.test(aside)) return line('notebook' + f, 'Notebook', h('span', { class: 'strip' }, rich(rest, live)));
   if (en.mode === 'text') return line('sms' + (me ? ' me' : '') + f, en.who, h('span', { class: 'bubble' }, rich(en.text, live)));
   if (en.mode === 'letter') return line('letter' + f, en.who, h('div', { class: 'paper' }, rich(en.text, live)));
-  if (en.mode === 'message') return line('message' + f, en.who, h('span', { class: 'msg' }, h('span', { class: 'msg-k' }, 'Message'), rich(en.text, live)));
+  if (en.mode === 'message') return line('message' + f, en.who, h('span', { class: 'msg' }, h('span', { class: 'msg-k' }, ic('message'), 'Message'), rich(en.text, live)));
   return line('say' + (me ? ' me' : '') + f, en.who, aside ? h('span', { class: 'aside' }, aside) : null, rich(rest, live));
 }
 
 function stubState(id) {
   const T = G.S.tasks[id], ts = G.engine.state.tasks[id];
   if (!ts || ts.status !== 'passed') return h('span', { class: 'chip live' }, 'In hand');
-  return h('span', { class: 'chip stamp' }, T.form === 'exam' ? 'Handed in' : T.form === 'lab' ? 'Passed' : 'Closed');
+  return h('span', { class: 'chip stamp' }, ic('check'), T.form === 'exam' ? 'Handed in' : T.form === 'lab' ? 'Passed' : 'Closed');
 }
 function stubLine(id, live) {
   const T = G.S.tasks[id];
   const code = T.form === 'workorder' ? fill(T.code) + (T.rev ? ' · rev ' + T.rev : '') : fill(T.code);
   const brief = T.brief || T.behavior[0] || '';
-  const card = h('button', { class: 'stub-card', type: 'button', 'data-task': id, onclick: () => openTicket(id) },
-    h('span', { class: 'code' }, code),
-    h('span', { class: 'name' }, fill(T.title)),
+  const card = h('button', { class: 'stub-card', type: 'button', 'data-task': id, onclick: () => openTicket(id), 'aria-label': formLabel(T) + ' ' + fill(T.code) + ': ' + fill(T.title) + '. Read it.' },
+    h('span', { class: 'code' }, ic('work'), code),
+    h('span', { class: 'name', 'data-task-title': id }, fill(T.title)),
     h('span', { class: 'state' }, stubState(id)),
     brief ? h('span', { class: 'brief' }, E.plain(fill(brief))) : null);
   return line('stub' + (live ? ' fresh' : ''), formLabel(T), card);
@@ -98,7 +98,7 @@ function passedLine(en) {
   const T = G.S.tasks[en.id];
   const verb = T.form === 'exam' ? 'Handed in.' : T.form === 'lab' ? fill(T.code) + ' passed.' : fill(T.code) + ' closed. Satisfactory.';
   const lib = T.driver ? ' Committed to your library: ' + fill(driverName(T.driver)) + '.' : '';
-  return sysLine('Checker', verb + lib + (en.extra ? ' Your own check went in with it.' : ''));
+  return sysLine('Checker', verb + lib + (en.extra ? ' Your own check went in with it.' : ''), 'ok');
 }
 
 function hintLine(en, live) {
@@ -106,17 +106,17 @@ function hintLine(en, live) {
   const amend = en.tier >= 3 && T && T.form === 'workorder';
   const { aside, rest } = splitAside(en.text);
   return h('div', { class: 'line say hint' + (amend ? ' amend' : '') + (live ? ' fresh' : '') },
-    h('div', { class: 'who' }, en.who || '', h('span', { class: 'tag' }, amend ? 'amendment' : 'hint')),
+    h('div', { class: 'who' }, en.who || '', h('span', { class: 'tag' }, ic(amend ? 'flag' : 'hint', { size: 11 }), amend ? 'amendment' : 'hint')),
     h('div', { class: 'txt' }, aside ? h('span', { class: 'aside' }, aside) : null, fill(rest)));
 }
 
 function boardLines(en) {
   const H = G.S.hyps[en.id];
   if (!H) return null;
-  if (en.what === 'demote') return sysLine('Case board', ['Crossed out: ', h('span', { class: 'struck' }, '“' + fill(H.text) + '”')]);
+  if (en.what === 'demote') return sysLine('Case board', ['Crossed out: ', h('span', { class: 'struck' }, '“' + fill(H.text) + '”')], 'case');
   const out = [];
-  if (en.first) out.push(sysLine('Case board', ["Your notebook has a case board now. Questions and answers go there; anything you note is pinned to what it bears on. ", linkBtn('Open it', () => showTab('board'))]));
-  out.push(sysLine('Case board', fill(H.question) + ' · “' + fill(H.text) + '”'));
+  if (en.first) out.push(sysLine('Case board', ["Your notebook has a case board now. Questions and answers go there; anything you note is pinned to what it bears on. ", linkBtn('Open it', () => showTab('board'))], 'case'));
+  out.push(sysLine('Case board', fill(H.question) + ' · “' + fill(H.text) + '”', 'case'));
   return out;
 }
 
@@ -134,7 +134,7 @@ function endCard(en) {
     ? h('div', { class: 'lore' }, h('div', { class: 'lore-h' }, 'Unlocked in the codex'),
       en.docs.map(d => {
         const D = G.S.docs[d];
-        return h('button', { class: 'lore-item', type: 'button', onclick: () => openDoc(d) }, h('span', { class: 't' }, fill(D.title)), h('span', { class: 'k' }, fill(D.kind)));
+        return h('button', { class: 'lore-item', type: 'button', onclick: () => openDoc(d) }, h('span', { class: 't' }, ic('doc'), fill(D.title)), h('span', { class: 'k' }, fill(D.kind)));
       }))
     : null;
   return h('section', { class: 'card' }, h('div', { class: 'eyebrow' }, 'End of ' + (C.label || en.id)), h('h3', null, fill(C.title || '')), h('p', null, tallySentence(en.tally)), lore);
@@ -236,11 +236,11 @@ function fillEnding(el) {
     h('div', { class: 'lore' }, h('div', { class: 'lore-h' }, 'Epilogue fragments'),
       e.codaList().map(k => h('div', { class: 'frag' + (k.open ? '' : ' locked') },
         h('div', null, h('span', { class: 't' }, fill(k.title)), h('span', { class: 'kk' }, fill(k.kind))),
-        k.played ? h('span', { class: 'chip done' }, 'Read')
+        k.played ? h('span', { class: 'chip done' }, ic('check'), 'Read')
           : k.open ? btn('Read it', 'primary small', () => { e.playCoda(k.id); after(true); })
-            : h('span', { class: 'chip' }, 'Locked'),
+            : h('span', { class: 'chip' }, ic('lock'), 'Locked'),
         !k.open ? h('div', { class: 'h' }, fill(k.hint)) : null))),
-    h('div', { class: 'row' }, btn('Replay a chapter', 'ghost small', () => openSheet('main')), btn('Title screen', 'ghost small', showTitle)));
+    h('div', { class: 'row' }, btn('Replay a chapter', 'ghost small', () => openSheet('main'), null, 'undo'), btn('Title screen', 'ghost small', showTitle, null, 'back')));
 }
 
 function errorCard(en) {
@@ -286,55 +286,60 @@ function refreshLive() {
 }
 function scrollStream(smooth) {
   const s = $('#stream');
-  s.scrollTo({ top: s.scrollHeight, behavior: smooth && !REDUCED ? 'smooth' : 'auto' });
+  s.scrollTo({ top: s.scrollHeight, behavior: smooth && !reducedMotion() ? 'smooth' : 'auto' });
 }
 
 /* ── the dock: continue, choices, and whatever the story is waiting on ── */
 function renderDock() {
   const dock = $('#dock-inner');
   const e = G.engine, st = e.state;
+  const before = dock.dataset.mode || '';
   dock.replaceChildren();
+  const mode = st.error ? 'error' : !st.wait ? 'continue' : st.wait.type;
+  dock.dataset.mode = mode;
   if (st.error) {
-    dock.append(h('div', { class: 'dock-row' }, h('span', { class: 'dock-msg grow' }, 'The story stopped on a problem in its data.'), btn('Restart this chapter', 'primary', restartChapter)));
-    return;
-  }
-  const w = st.wait;
-  if (!w) {
+    dock.append(h('div', { class: 'dock-row' }, h('span', { class: 'dock-msg grow' }, 'The story stopped on a problem in its data.'), btn('Restart this chapter', 'primary', restartChapter, null, 'restart')));
+  } else if (!st.wait) {
     dock.append(h('div', { class: 'dock-row' },
-      btn('Continue', 'primary', onContinue, { id: 'btn-continue' }),
-      h('span', { class: 'kbd', 'aria-hidden': 'true' }, 'Space'),
+      btn(['Continue', h('span', { class: 'kbd', 'aria-hidden': 'true' }, 'Space')], 'primary', onContinue, { id: 'btn-continue', 'aria-keyshortcuts': 'Space Enter' }, 'run'),
       h('span', { class: 'grow' }),
-      btn('Skip to next choice', 'ghost small', onSkip)));
-    return;
-  }
-  if (w.type === 'menu') {
+      btn('Skip to next choice', 'quiet small', onSkip, { 'data-tip': 'Advance until the story asks you something. Nothing is skipped from the log.' }, 'skip')));
+  } else if (st.wait.type === 'menu') {
     const opts = e.options();
     dock.append(h('div', { class: 'choices', role: 'group', 'aria-label': 'Choose' }, opts.map((o, k) =>
-      h('button', { class: 'choice', type: 'button', onclick: () => onChoose(o.i) },
+      h('button', { class: 'choice', type: 'button', onclick: () => onChoose(o.i), 'aria-keyshortcuts': String(k + 1) },
         h('span', { class: 'n', 'aria-hidden': 'true' }, String(k + 1)),
         h('span', null, fill(o.label)),
-        o.kind === '+' ? h('span', { class: 'k' }, 'ask') : h('span')))));
-    return;
-  }
-  if (w.type === 'task') {
-    const T = G.S.tasks[w.id];
-    dock.append(h('div', { class: 'dock-row' },
+        o.kind === '+' ? h('span', { class: 'k' }, ic('message'), 'ask') : h('span')))));
+  } else if (st.wait.type === 'task') {
+    const T = G.S.tasks[st.wait.id];
+    dock.append(h('div', { class: 'dock-task' },
+      h('span', { class: 'who', 'aria-hidden': 'true' }, ic('work', { size: 20 })),
       h('span', { class: 'dock-msg grow' }, h('b', null, fill(T.title)), ' is in hand. Write it, run it on the ' + fill(G.S.meta.mcu || 'chip') + ', submit it when it behaves.'),
-      btn('Read the ' + formLabel(T).toLowerCase(), 'ghost', () => openTicket(w.id)),
-      btn('Open the workbench', 'primary', () => window.Bench.open(w.id))));
-    return;
+      btn('Read the ' + formLabel(T).toLowerCase(), 'ghost', () => openTicket(st.wait.id), null, 'doc'),
+      btn('Open the workbench', 'primary', ev => openBench(st.wait.id, ev.currentTarget), null, 'board')));
+  } else if (st.wait.type === 'recall') {
+    dock.append(h('div', { class: 'dock-row' }, h('span', { class: 'dock-msg grow' }, 'The whole notebook, above. Take your time.'), btn('Close the notebook', 'primary', () => { e.finishRecall(); after(true); }, null, 'note')));
+  } else if (st.wait.type === 'believe') {
+    dock.append(h('div', { class: 'dock-row' }, h('span', { class: 'dock-msg grow' }, 'One per question, or leave it open.'), btn('That’s my answer', 'primary', onBelieve, null, 'check')));
+  } else if (st.wait.type === 'ending') {
+    dock.append(h('div', { class: 'dock-row' }, h('span', { class: 'dock-msg grow' }, 'End of the first cut. Epilogue fragments are in the card above.'), btn('Title screen', 'ghost', showTitle, null, 'back')));
   }
-  if (w.type === 'recall') {
-    dock.append(h('div', { class: 'dock-row' }, h('span', { class: 'dock-msg grow' }, 'The whole notebook, above. Take your time.'), btn('Close the notebook', 'primary', () => { e.finishRecall(); after(true); })));
-    return;
+  // The dock changes shape with what the story waits for: a short, soft settle, never a block.
+  if (before && before !== mode && dock.firstChild && SNX()) {
+    SNX().motion.animate(dock, [{ opacity: 0.6, transform: 'translateY(6px) scale(0.99)' }, { opacity: 1, transform: 'none' }], { dur: 260, ease: SNX().motion.EASE.spring, key: 'dock' });
   }
-  if (w.type === 'believe') {
-    dock.append(h('div', { class: 'dock-row' }, h('span', { class: 'dock-msg grow' }, 'One per question, or leave it open.'), btn('That’s my answer', 'primary', onBelieve)));
-    return;
-  }
-  if (w.type === 'ending') {
-    dock.append(h('div', { class: 'dock-row' }, h('span', { class: 'dock-msg grow' }, 'End of the first cut. Epilogue fragments are in the card above.'), btn('Title screen', 'ghost', showTitle)));
-  }
+}
+
+/* Open the bench for a task; the task's title flies from where the player clicked into the bench header. */
+function openBench(id, fromEl) {
+  closePop();
+  let src = null;
+  const card = $('[data-task-title="' + id + '"]', $('#panel-body')) || $$('[data-task-title="' + id + '"]').pop();
+  if (card && card.offsetParent !== null) src = card;
+  else if (fromEl && fromEl.offsetParent !== null) src = fromEl;
+  G.ui.streamScroll = $('#stream').scrollTop;
+  return window.Bench.open(id, { from: src });
 }
 
 /* One refresh after every action: new lines, hotspot states, the dock, the side panel, the save. */
