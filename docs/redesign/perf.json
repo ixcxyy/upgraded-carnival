@@ -1,0 +1,161 @@
+{
+ "url": "http://127.0.0.1:8028/",
+ "when": "2026-10-21T10:04:24.186Z",
+ "note": "headless Chromium, software rendering; machine-dependent",
+ "runs": {
+  "no-preference": {
+   "title_idle": {
+    "frames": 179,
+    "p50_ms": 16.7,
+    "p95_ms": 16.8,
+    "max_ms": 16.8,
+    "over_25ms": 0,
+    "cpu": {
+     "wall_ms": 3026,
+     "main_thread_ms": 233,
+     "script_ms": 35.8,
+     "layout_ms": 4.7,
+     "style_ms": 13.8
+    }
+   },
+   "title_strip_animating": true,
+   "title_running_css_animations": 0,
+   "popover_grow": {
+    "frames": 37,
+    "p50_ms": 16.7,
+    "p95_ms": 16.8,
+    "max_ms": 16.8,
+    "over_25ms": 0,
+    "cpu": {
+     "wall_ms": 649,
+     "main_thread_ms": 66.9,
+     "script_ms": 3.3,
+     "layout_ms": 2.4,
+     "style_ms": 14.1
+    }
+   },
+   "popover_animations_after_open": 0,
+   "wave_wheel_zoom_60": {
+    "frames": 179,
+    "p50_ms": 16.7,
+    "p95_ms": 16.7,
+    "max_ms": 16.8,
+    "over_25ms": 0,
+    "cpu": {
+     "wall_ms": 3004,
+     "main_thread_ms": 150.3,
+     "script_ms": 48.8,
+     "layout_ms": 0,
+     "style_ms": 0
+    }
+   },
+   "wave_drag_pan": {
+    "frames": 161,
+    "p50_ms": 16.7,
+    "p95_ms": 16.8,
+    "max_ms": 16.8,
+    "over_25ms": 0,
+    "cpu": {
+     "wall_ms": 1350,
+     "main_thread_ms": 151.6,
+     "script_ms": 30.9,
+     "layout_ms": 7.4,
+     "style_ms": 1.4
+    }
+   },
+   "bench_idle": {
+    "frames": 359,
+    "p50_ms": 16.7,
+    "p95_ms": 16.7,
+    "max_ms": 16.8,
+    "over_25ms": 0,
+    "cpu": {
+     "wall_ms": 2010,
+     "main_thread_ms": 26.1,
+     "script_ms": 2.9,
+     "layout_ms": 0,
+     "style_ms": 0
+    }
+   },
+   "bench_running_animations_idle": 0,
+   "page_errors": []
+  },
+  "reduce": {
+   "title_idle": {
+    "frames": 179,
+    "p50_ms": 16.7,
+    "p95_ms": 16.8,
+    "max_ms": 16.8,
+    "over_25ms": 0,
+    "cpu": {
+     "wall_ms": 3009,
+     "main_thread_ms": 40.4,
+     "script_ms": 4.7,
+     "layout_ms": 0.4,
+     "style_ms": 1.7
+    }
+   },
+   "title_strip_animating": false,
+   "title_running_css_animations": 0,
+   "popover_grow": {
+    "frames": 40,
+    "p50_ms": 16.7,
+    "p95_ms": 16.7,
+    "max_ms": 16.8,
+    "over_25ms": 0,
+    "cpu": {
+     "wall_ms": 657,
+     "main_thread_ms": 29.8,
+     "script_ms": 3.9,
+     "layout_ms": 1.7,
+     "style_ms": 2.5
+    }
+   },
+   "popover_animations_after_open": 0,
+   "wave_wheel_zoom_60": {
+    "frames": 180,
+    "p50_ms": 16.7,
+    "p95_ms": 16.8,
+    "max_ms": 150,
+    "over_25ms": 4,
+    "cpu": {
+     "wall_ms": 3266,
+     "main_thread_ms": 259.6,
+     "script_ms": 101.1,
+     "layout_ms": 0,
+     "style_ms": 0
+    }
+   },
+   "wave_drag_pan": {
+    "frames": 159,
+    "p50_ms": 16.7,
+    "p95_ms": 16.8,
+    "max_ms": 16.8,
+    "over_25ms": 0,
+    "cpu": {
+     "wall_ms": 1334,
+     "main_thread_ms": 156.2,
+     "script_ms": 33.8,
+     "layout_ms": 7.5,
+     "style_ms": 1.5
+    }
+   },
+   "bench_idle": {
+    "frames": 359,
+    "p50_ms": 16.7,
+    "p95_ms": 16.7,
+    "max_ms": 16.8,
+    "over_25ms": 0,
+    "cpu": {
+     "wall_ms": 2011,
+     "main_thread_ms": 24.5,
+     "script_ms": 3.1,
+     "layout_ms": 0,
+     "style_ms": 0
+    }
+   },
+   "bench_running_animations_idle": 0,
+   "page_errors": []
+  }
+ }
+}

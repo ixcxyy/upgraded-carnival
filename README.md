@@ -25,6 +25,7 @@ When the story hands you a task, **Open the workbench**:
 - **Results** — each rule the checker applied, with measurements. After a submit, every seed; replay any of them.
 - **Debugger** — `F10` over, `F11` into, `Shift+F11` out, `Shift+F10` **back** (time runs backwards: every stop can be undone), `F6` pause, `Shift+F5` stop. Call stack across interrupts, locals and globals, watch expressions (C, `$reg`, `GPIOA.DAT`) with *break on write*, registers, every peripheral register decoded without side effects, memory, and time travel to any moment on the waveform.
 - **Work order**, **Board** and **Datasheet** on the right.
+- **Layout** — panels fold to rails and remember it; `Ctrl+J` folds the analysis area, `Ctrl+Shift+E` gives the editor the whole window. Theme (dark, light or the system's), text size and reduced motion are in the menu.
 
 ## Build from source
 
@@ -58,9 +59,15 @@ cargo test --release --workspace      # emulator, decoder (against llvm-mc when 
                                       # anti-solution fails for the reason it was written for;
                                       # traces are identical with idle-skipping on and off
 node tools/ledger-cli.js content/story  # the story: references, clue economy, 450 simulated playthroughs
+(cd app && npm run test:ui)           # frontend regressions: real handlers, in-memory editor/backend boundaries
 ```
 
 `k28` also runs single files against a task: `k28 check my.c --level 3.1`, `k28 run my.c --level 3.1 --seed 7`, and regenerates the datasheet: `k28 datasheet --out content/sdk/datasheet.html`.
+
+Browser QA against the dev server (Playwright installed outside the product) lives in `tools/qa/`:
+`capture.cjs` (screenshots plus interaction checks with the real compiler and emulator), `perf.cjs`,
+`motion-reel.cjs` and `mocked-smoke.cjs`. The UI redesign and how it was verified are written up in
+[`docs/REDESIGN.md`](docs/REDESIGN.md).
 
 ## Layout
 

@@ -1,0 +1,172 @@
+{
+ "started": "2026-10-21T10:09:49.073Z",
+ "url": "http://127.0.0.1:8028/",
+ "checks": [
+  {
+   "name": "title: one primary action",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "title: decorative strip labelled decorative",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "popover: focus moves into it",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "popover: Escape, then Space continues reading",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "story: reached a task",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "story: dialogue stays text",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "work order: pin map from level data",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "rail: active destination has a visible label",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "clues: an open whisper is not underlined, tinted or animated",
+   "ok": true,
+   "detail": "no open whisper in view"
+  },
+  {
+   "name": "rail: clicking the open destination folds the panel",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "rail: picking a destination unfolds it",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "dialog: duplicate profile name refused inline",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "dialog: Escape closes and returns focus into the sheet",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "bench: analysis area folded before first use",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "bench: editor has focus",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "dock: hovering Run shows its name and shortcut inside the window",
+   "ok": true,
+   "detail": "Run on the chosen seedCtrl+Enter"
+  },
+  {
+   "name": "header: every visible control has an accessible name",
+   "ok": true,
+   "detail": "0 unnamed"
+  },
+  {
+   "name": "build error: Build tab selected with diagnostics",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "submit: one chip per seed from the backend",
+   "ok": true,
+   "detail": "5 chips"
+  },
+  {
+   "name": "evidence: expected lane drawn",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "debug: stepping advances time",
+   "ok": true,
+   "detail": "t = 3.57 µs → t = 3.77 µs"
+  },
+  {
+   "name": "debug: reverse step returns to an earlier backend time",
+   "ok": true,
+   "detail": "t = 3.77 µs → t = 3.64 µs"
+  },
+  {
+   "name": "datasheet: search finds PCLKCR",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "bench 1000x620: no horizontal overflow",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "bench 1920x1080: no horizontal overflow",
+   "ok": true,
+   "detail": null
+  },
+  {
+   "name": "narrow: no horizontal overflow",
+   "ok": true,
+   "detail": null
+  }
+ ],
+ "errors": [],
+ "shots": [
+  "01-title-reveal-250ms",
+  "02-title",
+  "04-clue-popover",
+  "03-story-task-in-hand",
+  "05-case-board",
+  "06-codex",
+  "07-work-order",
+  "07b-panel-folded",
+  "08-menu",
+  "09-dialog-validation",
+  "10-bench-enter-160ms",
+  "11-bench-open",
+  "11b-dock-tooltip",
+  "12-build-error",
+  "13-run-result",
+  "14-waveform",
+  "15-submit-failed",
+  "16-evidence-bloom",
+  "17-evidence",
+  "18-debug",
+  "19-reverse-step-ack",
+  "20-after-reverse",
+  "21-datasheet",
+  "22-new-file-dialog",
+  "23-focus-editor",
+  "24-bench-1000x620",
+  "24-bench-1920x1080",
+  "25-back-to-story",
+  "26-story-light",
+  "27-story-1000x620",
+  "28-story-720",
+  "29-case-720"
+ ],
+ "finished": "2026-10-21T10:10:16.730Z"
+}
