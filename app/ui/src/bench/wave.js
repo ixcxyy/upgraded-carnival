@@ -3,11 +3,14 @@
 // (or shift-click) cursor B; both snap to the nearest edge. A failing rule's evidence is drawn
 // as an "expected" lane under the pin it is about, with every mismatch shaded.
 
-import { h, btn, fmtT, fmtF, VECTORS } from './util.js';
+import { h, btn, ibtn, icon, fmtT, fmtF, VECTORS } from './util.js';
 
-const LABEL_W = 148;
-const AXIS_H = 26;
-const ROW_H = { pin: 30, expect: 22, isr: 20, console: 22, marks: 20 };
+const LABEL_W = 156;
+const AXIS_H = 30;
+const ROW_H = { pin: 34, expect: 24, isr: 22, console: 24, marks: 22 };
+// Restrained per-channel accents, assigned in board order (the trace colour stays one hue family).
+const CHANNEL = ['#8ED6FF', '#9FE8D0', '#B9C8FF', '#A9E8F0', '#C6E3A8', '#9CC9F5', '#D7E1EA', '#8FE0E8'];
+const CHANNEL_LIGHT = ['#1F5FAE', '#1B7A60', '#4250A8', '#0E6E7B', '#4D7A1E', '#2B6CB0', '#4C555C', '#0F7C86'];
 const MIN_SPAN = 20; // cycles (200 ns) across the plot at most zoom
 
 function upper(arr, v, lo = 0, hi = arr.length) {
@@ -65,27 +68,35 @@ export class Wave {
     this.hover = null;
     this.sel = 0;
     this.raf = 0;
-    this.empty = 'Run the firmware to see its pins here.';
+    this.trail = null; // { from, to, t0 } — a reverse step's acknowledgement band, both ends real times
 
     this.readout = h('span', { class: 'wave-read' });
-    this.hoverOut = h('span', { class: 'wave-hover' });
-    this.gotoBtn = btn('Go to cursor', 'ghost small', () => this.curA !== null && this.hooks.onGoto && this.hooks.onGoto(Math.round(this.curA)),
-      { title: 'Travel the debug session to the time at cursor A (forwards or backwards)', hidden: true });
+    this.hoverOut = h('span', { class: 'wave-hover mono' });
+    this.gotoBtn = btn('Travel to A', 'ghost small', () => this.curA !== null && this.hooks.onGoto && this.hooks.onGoto(Math.round(this.curA)),
+      { 'data-tip': 'Take the debug session to the time at cursor A, forwards or backwards', hidden: true }, 'travel');
     this.bar = h('div', { class: 'wave-bar' },
-      h('div', { class: 'grp' },
-        btn('Fit', 'ghost small', () => this.fit(), { title: 'Show the whole run (double-click the trace)' }),
-        btn('−', 'ghost small icon', () => this.zoom(1.6), { title: 'Zoom out (wheel down)' }),
-        btn('+', 'ghost small icon', () => this.zoom(1 / 1.6), { title: 'Zoom in (wheel up)' }),
-        btn('◂ Edge', 'ghost small', () => this.edge(-1), { title: 'Move cursor A to the previous edge on the selected row (←)' }),
-        btn('Edge ▸', 'ghost small', () => this.edge(1), { title: 'Move cursor A to the next edge on the selected row (→)' }),
+      h('div', { class: 'grp', role: 'toolbar', 'aria-label': 'Waveform view' },
+        ibtn('fit', 'Fit the whole run', () => this.fit(), { cls: 'sm', kbd: 'F or 0', at: 'below' }),
+        ibtn('zoom-out', 'Zoom out', () => this.zoom(1.6), { cls: 'sm', kbd: '−', at: 'below' }),
+        ibtn('zoom-in', 'Zoom in', () => this.zoom(1 / 1.6), { cls: 'sm', kbd: '+', at: 'below' }),
+        h('span', { class: 'gsep' }),
+        ibtn('edge-prev', 'Cursor A to the previous edge on the selected row', () => this.edge(-1), { cls: 'sm', kbd: '←', at: 'below' }),
+        ibtn('edge-next', 'Cursor A to the next edge on the selected row', () => this.edge(1), { cls: 'sm', kbd: '→', at: 'below' }),
         this.gotoBtn),
       this.readout,
       this.hoverOut);
     this.axis = h('canvas', { class: 'wave-axis' });
-    this.canvas = h('canvas', { class: 'wave-rows', tabindex: '0', 'aria-label': 'Waveform. Arrow keys move between edges, plus and minus zoom.' });
+    this.canvas = h('canvas', { class: 'wave-rows', tabindex: '0', 'aria-label': 'Waveform. Arrow keys move between edges, up and down pick a row, plus and minus zoom, F fits.' });
     this.scroll = h('div', { class: 'wave-scroll' }, this.canvas);
-    this.msg = h('div', { class: 'wave-empty' }, this.empty);
-    this.el = h('div', { class: 'wave' }, this.bar, h('div', { class: 'wave-view' }, this.axis, this.scroll, this.msg));
+    this.runBtn = btn('Run seed', 'primary small', () => this.hooks.onRun && this.hooks.onRun(), null, 'run');
+    this.msg = h('div', { class: 'wave-empty' },
+      h('div', { class: 'we-card' },
+        h('span', { class: 'we-ico' }, icon('wave', { size: 22 })),
+        h('b', null, 'No capture yet'),
+        this.emptyText = h('span', null, 'Run the firmware to record every pin it touches, interrupt activity and the debug console, on one time axis.'),
+        h('span', { class: 'row' }, this.runBtn, h('span', { class: 'kbd' }, 'Ctrl+Enter'))));
+    this.flash = h('div', { class: 'wave-flash', 'aria-hidden': 'true' });
+    this.el = h('div', { class: 'wave' }, this.bar, h('div', { class: 'wave-view' }, this.axis, this.scroll, this.flash, this.msg));
     host.append(this.el);
 
     this.bindMouse(this.canvas, false);
@@ -105,8 +116,9 @@ export class Wave {
     this.trace = trace;
     this.rows = [];
     if (!trace) {
-      this.msg.textContent = o.empty || this.empty;
+      if (o.empty) this.emptyText.textContent = o.empty;
       this.msg.hidden = false;
+      this.updateReadout();
       this.schedule();
       return;
     }
@@ -119,11 +131,12 @@ export class Wave {
       if (ia >= 0 || ib >= 0) return (ia < 0 ? 1e9 : ia) - (ib < 0 ? 1e9 : ib);
       return a.pin - b.pin;
     });
+    let ci = 0;
     for (const p of pins) {
       const n = p.ch.length >> 1;
       const t = new Float64Array(n), l = new Uint8Array(n);
       for (let i = 0; i < n; i++) { t[i] = p.ch[2 * i]; l[i] = p.ch[2 * i + 1]; }
-      this.rows.push({ kind: 'pin', pin: p.pin, name: p.name, label: p.label || '', dir: p.dir || '', board: p.board, t, l });
+      this.rows.push({ kind: 'pin', pin: p.pin, name: p.name, label: p.label || '', dir: p.dir || '', board: p.board, t, l, ch: p.board ? ci++ : -1 });
     }
     // Interrupts: one lane per vector that ran.
     const byVec = new Map();
@@ -145,7 +158,15 @@ export class Wave {
     this.halts = trace.halts || [];
     this.insertExpect();
     this.sel = Math.min(this.sel, Math.max(0, this.rows.length - 1));
-    if (!keepView) this.fit(); else this.schedule();
+    if (!keepView) { this.curA = null; this.curB = null; this.updateReadout(); this.fit(); } else this.schedule();
+  }
+
+  /** Cursors are positions in one recording; a different recording starts without them. */
+  clearCursors() {
+    this.curA = null;
+    this.curB = null;
+    this.updateReadout();
+    this.schedule();
   }
 
   setEvidence(ev) {
@@ -157,8 +178,25 @@ export class Wave {
       this.curA = ev.at;
       this.curB = null;
       this.updateReadout();
+      this.emphasise(ev.t0, ev.t1);
     }
     this.schedule();
+  }
+
+  /**
+   * A short bloom over [t0, t1] when evidence opens: an overlay at the region's exact place.
+   * The traces under it are drawn as recorded; nothing about the data moves.
+   */
+  emphasise(t0, t1) {
+    if (!window.SN || window.SN.motion.reduced()) return;
+    requestAnimationFrame(() => {
+      const x0 = Math.max(LABEL_W, this.xOf(t0)), x1 = Math.min(this.width(), this.xOf(t1));
+      if (!(x1 > x0)) return;
+      Object.assign(this.flash.style, { left: x0 + 'px', width: Math.max(4, x1 - x0) + 'px' });
+      window.SN.motion.animate(this.flash, [
+        { opacity: 0, transform: 'scaleX(0.6)' }, { opacity: 1, transform: 'scaleX(1)', offset: 0.35 }, { opacity: 0, transform: 'scaleX(1)' },
+      ], { dur: 900, ease: 'ease-out', key: 'flash' });
+    });
   }
 
   insertExpect() {
@@ -172,10 +210,27 @@ export class Wave {
     }
   }
 
-  setNow(t) {
+  /** The debugger's time. opts.from: the time it came from, after a step backwards. */
+  setNow(t, opts) {
+    const prev = this.now;
     this.now = t === null || t === undefined ? null : t;
     this.gotoBtn.hidden = this.now === null;
+    const from = opts && opts.from;
+    if (from !== undefined && from !== null && this.now !== null && from > this.now && window.SN && !window.SN.motion.reduced()) {
+      this.trail = { from, to: this.now, t0: performance.now() };
+      this.animateTrail();
+    } else if (prev !== this.now) this.trail = null;
     this.schedule();
+  }
+
+  animateTrail() {
+    const step = () => {
+      if (!this.trail) return;
+      this.schedule();
+      if (performance.now() - this.trail.t0 < 650) requestAnimationFrame(step);
+      else { this.trail = null; this.schedule(); }
+    };
+    requestAnimationFrame(step);
   }
 
   // ── view ──
@@ -403,13 +458,13 @@ export class Wave {
 
   updateReadout() {
     const parts = [];
-    if (this.curA !== null) parts.push(h('span', { class: 'ca' }, 'A ' + fmtT(this.curA, 4)));
-    if (this.curB !== null) parts.push(h('span', { class: 'cb' }, 'B ' + fmtT(this.curB, 4)));
+    if (this.curA !== null) parts.push(h('span', { class: 'cur ca' }, h('i', null, 'A'), fmtT(this.curA, 4)));
+    if (this.curB !== null) parts.push(h('span', { class: 'cur cb' }, h('i', null, 'B'), fmtT(this.curB, 4)));
     if (this.curA !== null && this.curB !== null) {
       const d = Math.abs(this.curB - this.curA);
-      parts.push(h('span', { class: 'cd' }, 'Δ ' + fmtT(d, 4) + (d > 0 ? ' · ' + fmtF(d) : '')));
+      parts.push(h('span', { class: 'cur cd' }, h('i', null, 'Δ'), fmtT(d, 4) + (d > 0 ? ' · ' + fmtF(d) : '')));
     }
-    if (!parts.length) parts.push(h('span', { class: 'hint' }, 'Click: cursor A · right-click: cursor B · wheel: zoom · drag: pan'));
+    if (!parts.length && this.trace) parts.push(h('span', { class: 'hint' }, 'Click: cursor A · right-click: B · wheel: zoom · drag: pan'));
     this.readout.replaceChildren(...parts);
   }
 
@@ -446,21 +501,31 @@ export class Wave {
       c.style.width = W + 'px';
       c.style.height = hh + 'px';
     }
+    const light = getComputedStyle(document.documentElement).colorScheme.indexOf('light') >= 0;
     const C = {
-      ink: css(this.el, '--ink', '#222'),
-      ink2: css(this.el, '--ink-2', '#555'),
-      ink3: css(this.el, '--ink-3', '#888'),
-      rule: css(this.el, '--rule', '#ccc'),
-      sig: css(this.el, '--trace', '#1D5AA6'),
-      grid: css(this.el, '--trace-grid', 'rgba(0,0,0,0.06)'),
-      exp: css(this.el, '--accent', '#245C63'),
-      red: css(this.el, '--red', '#A8321F'),
-      bg: css(this.el, '--code-bg', '#fff'),
-      sel: css(this.el, '--code-active', 'rgba(0,0,0,0.04)'),
-      z: css(this.el, '--wave-z', '#B7862B'),
-      fill: css(this.el, '--wave-fill', 'rgba(29, 90, 166, 0.10)'),
-      curB: css(this.el, '--wave-b', '#8A4FB0'),
+      ink: css(this.el, '--text', '#eee'),
+      ink2: css(this.el, '--text-2', '#bbb'),
+      ink3: css(this.el, '--text-3', '#888'),
+      ink4: css(this.el, '--text-4', '#666'),
+      rule: css(this.el, '--line', 'rgba(255,255,255,0.08)'),
+      rule2: css(this.el, '--line-2', 'rgba(255,255,255,0.13)'),
+      sig: css(this.el, '--sig', '#8ED6FF'),
+      grid: css(this.el, '--sig-grid', 'rgba(255,255,255,0.05)'),
+      exp: css(this.el, '--expect', '#A9E8F0'),
+      acc: css(this.el, '--accent', '#A9E8F0'),
+      red: css(this.el, '--fault', '#FF7D6E'),
+      bg: css(this.el, '--wave-bg', '#070809'),
+      lab: css(this.el, '--bg-1', '#0A0B0D'),
+      sel: css(this.el, '--code-active', 'rgba(255,255,255,0.04)'),
+      z: css(this.el, '--sig-z', '#E6B65C'),
+      fill: css(this.el, '--sig-fill', 'rgba(142,214,255,0.09)'),
+      curA: css(this.el, '--cur-a', '#F4F4F2'),
+      curB: css(this.el, '--cur-b', '#FFB08A'),
+      pc: css(this.el, '--pc', '#F6C453'),
       mono: css(this.el, '--f-mono', 'monospace'),
+      ui: css(this.el, '--f-ui', 'sans-serif'),
+      chan: i => (light ? CHANNEL_LIGHT : CHANNEL)[(i < 0 ? 0 : i) % CHANNEL.length],
+      light,
     };
     this.drawAxis(dpr, W, C);
     this.drawRows(dpr, W, H, C);
@@ -487,7 +552,9 @@ export class Wave {
     g.lineTo(W, AXIS_H - 0.5);
     g.stroke();
     if (!this.trace) return;
-    g.font = '11px ' + C.mono;
+    g.fillStyle = C.lab;
+    g.fillRect(0, 0, LABEL_W, AXIS_H);
+    g.font = '10.5px ' + C.mono;
     g.fillStyle = C.ink3;
     g.textBaseline = 'middle';
     const { step, list } = this.ticks();
@@ -495,12 +562,13 @@ export class Wave {
     for (const t of list) {
       const x = this.xOf(t);
       if (x < LABEL_W - 1) continue;
-      g.fillRect(Math.round(x), AXIS_H - 6, 1, 6);
-      g.fillText(fmt(t), x + 3, AXIS_H / 2 - 1);
+      g.fillRect(Math.round(x), AXIS_H - 7, 1, 7);
+      g.fillText(fmt(t), x + 4, AXIS_H - 12);
     }
+    g.font = '600 10.5px ' + C.ui;
     g.fillStyle = C.ink3;
-    g.fillText('time', 10, AXIS_H / 2 - 1);
-    for (const [s, e] of this.halts) this.band(g, s, e, AXIS_H, 'rgba(183,134,43,0.18)', W);
+    g.fillText('TIME', 12, AXIS_H - 12);
+    for (const [s, e] of this.halts) this.band(g, s, e, AXIS_H, 'rgba(230,182,92,0.16)', W);
     this.drawMarkers(g, AXIS_H, W, C, true);
   }
 
@@ -526,23 +594,42 @@ export class Wave {
       g.stroke();
       g.setLineDash([]);
       if (axis && label) {
-        const tw = g.measureText(label).width + 8;
+        g.font = '600 10px ' + C.mono;
+        const tw = g.measureText(label).width + 12;
         // Stack labels that would overlap (a cursor sitting on the evidence mark, say).
         let row = 0;
-        while (placed.some(p => p.row === row && x < p.x1 + 2 && x + tw > p.x0 - 2) && row < 1) row++;
-        placed.push({ x0: x, x1: x + tw, row });
-        const y = 1 + row * 12;
+        while (placed.some(p => p.row === row && x - tw / 2 < p.x1 + 2 && x + tw / 2 > p.x0 - 2) && row < 1) row++;
+        const x0 = Math.min(Math.max(LABEL_W + 1, x - tw / 2), W - tw - 1);
+        placed.push({ x0, x1: x0 + tw, row });
+        const y = 2 + row * 0;
+        // A rounded handle centred on its line (the line itself stays on the exact time).
         g.fillStyle = color;
-        g.fillRect(x, y, tw, 12);
-        g.fillStyle = C.bg;
-        g.fillText(label, x + 4, y + 6.5);
+        g.beginPath();
+        if (g.roundRect) g.roundRect(x0, y + row * 13, tw, 13, 6.5); else g.rect(x0, y + row * 13, tw, 13);
+        g.fill();
+        g.fillStyle = C.light ? '#fff' : '#05070A';
+        g.textBaseline = 'middle';
+        g.fillText(label, x0 + 6, y + row * 13 + 7);
       }
     };
+    if (this.trail && !axis) {
+      // Reverse step: a band from where time was to where it is now, fading out.
+      const k = Math.min(1, (performance.now() - this.trail.t0) / 650);
+      const xa = Math.max(LABEL_W, this.xOf(this.trail.to)), xb = Math.min(W, this.xOf(this.trail.from));
+      if (xb > xa) {
+        const gr = g.createLinearGradient(xa, 0, xb, 0);
+        gr.addColorStop(0, 'rgba(169,232,240,' + (0.30 * (1 - k)).toFixed(3) + ')');
+        gr.addColorStop(1, 'rgba(169,232,240,0)');
+        g.fillStyle = gr;
+        g.fillRect(xa, 0, xb - xa, H);
+      }
+      line(this.trail.from, 'rgba(169,232,240,' + (0.6 * (1 - k)).toFixed(3) + ')', null, [2, 3]);
+    }
     if (this.evidence) line(this.evidence.at, C.red, 'here', [3, 3]);
-    if (this.now !== null) line(this.now, C.exp, 'now');
-    line(this.curA, C.ink, 'A');
+    if (this.now !== null) line(this.now, C.pc, 'now');
+    line(this.curA, C.curA, 'A');
     line(this.curB, C.curB, 'B');
-    if (this.hover && !axis) line(this.hover.t, C.ink3, null, [2, 3]);
+    if (this.hover && !axis) line(this.hover.t, C.ink4, null, [2, 3]);
   }
 
   drawRows(dpr, W, H, C) {
@@ -564,7 +651,7 @@ export class Wave {
       g.fillStyle = C.grid;
       for (let x = Math.max(LABEL_W, Math.floor(xe)); x < W; x += 6) g.fillRect(x, 0, 1, H);
     }
-    for (const [s, e] of this.halts) this.band(g, s, e, H, 'rgba(183,134,43,0.12)', W);
+    for (const [s, e] of this.halts) this.band(g, s, e, H, 'rgba(230,182,92,0.10)', W);
     this.missCache = new Map();
     if (this.evidence) for (const tr of this.evidence.tracks || []) this.missCache.set(tr.pin, this.mismatches(tr.pin));
     let top = 0;
@@ -590,39 +677,44 @@ export class Wave {
       g.fillRect(0, top + hh - 1, W, 1);
       top += hh;
     }
-    g.fillStyle = C.rule;
+    g.fillStyle = C.rule2;
     g.fillRect(LABEL_W - 1, 0, 1, H);
     this.drawMarkers(g, H, W, C, false);
   }
 
   drawLabel(g, r, top, hh, C, selected) {
-    g.fillStyle = C.bg;
+    g.fillStyle = C.lab;
     g.fillRect(0, top, LABEL_W - 1, hh - 1);
     if (selected) {
       g.fillStyle = C.sel;
       g.fillRect(0, top, LABEL_W - 1, hh - 1);
-      g.fillStyle = C.exp;
-      g.fillRect(0, top, 3, hh - 1);
+      g.fillStyle = C.acc;
+      g.fillRect(0, top + 4, 2, hh - 9);
     }
     g.textBaseline = 'middle';
     const mid = top + hh / 2;
     if (r.kind === 'pin') {
-      g.font = '600 12px ' + C.mono;
-      g.fillStyle = r.board ? C.ink : C.ink2;
+      // Channel swatch, then the board's name for the pin, then the chip's.
+      g.fillStyle = r.board ? C.chan(r.ch) : C.ink4;
+      g.beginPath();
+      if (g.roundRect) g.roundRect(10, mid - 4, 8, 8, 2); else g.rect(10, mid - 4, 8, 8);
+      g.fill();
+      g.font = '600 12px ' + C.ui;
+      g.fillStyle = r.board ? C.ink : C.ink3;
       const main = r.label || r.name;
-      g.fillText(main, 10, mid);
+      g.fillText(main, 26, mid);
       const w = g.measureText(main).width;
-      g.font = '11px ' + C.mono;
+      g.font = '10.5px ' + C.mono;
       g.fillStyle = C.ink3;
-      const sub = (r.label ? r.name : '') + (r.dir === 'in' ? ' ←' : r.dir === 'out' ? ' →' : '') + (r.board ? '' : 'n.c.');
-      g.fillText(sub, 16 + w, mid);
+      const sub = (r.label ? r.name : '') + (r.dir === 'in' ? ' in' : r.dir === 'out' ? ' out' : '') + (r.board ? '' : 'n.c.');
+      g.fillText(sub, 32 + w, mid);
     } else {
-      g.font = '11px ' + C.mono;
+      g.font = r.kind === 'expect' ? 'italic 11px ' + C.ui : '600 10.5px ' + C.ui;
       g.fillStyle = r.kind === 'expect' ? C.exp : C.ink3;
-      const txt = r.kind === 'expect' ? '  expected'
+      const txt = r.kind === 'expect' ? 'expected'
         : r.kind === 'isr' ? 'ISR ' + (VECTORS[r.vector] || r.vector)
           : r.kind === 'console' ? 'DBGCON' : 'MARK';
-      g.fillText(txt, 10, mid);
+      g.fillText(txt, r.kind === 'expect' ? 26 : 12, mid);
     }
   }
 
@@ -630,7 +722,8 @@ export class Wave {
     const n = r.t.length;
     if (!n) return;
     this.shadeMiss(g, r.pin, top, hh, W);
-    const yH = top + 6, yL = top + hh - 7, yZ = top + hh / 2;
+    const yH = top + 7, yL = top + hh - 8, yZ = top + hh / 2;
+    const sig = r.board ? C.chan(r.ch) : C.ink3;
     const yOf = l => (l === 1 ? yH : l === 0 ? yL : yZ);
     const pxPer = this.plotW() / this.span;
     const vEnd = Math.min(this.v0 + this.span * 1.01 + 1 / pxPer, this.end);
@@ -669,12 +762,15 @@ export class Wave {
       i++;
     }
     segs.push([x, Math.min(xEnd, W + 2), cur]);
-    // High fill.
-    g.fillStyle = C.fill;
+    // High fill: a faint wash of the channel's own colour.
+    g.fillStyle = sig;
+    g.globalAlpha = C.light ? 0.08 : 0.10;
     for (const [a, b, l] of segs) if (l === 1 && b > a) g.fillRect(a, yH, b - a, yL - yH);
+    g.globalAlpha = 1;
     // Lines.
     g.lineWidth = 1.5;
-    g.strokeStyle = C.sig;
+    g.lineJoin = 'miter';
+    g.strokeStyle = sig;
     g.beginPath();
     for (const [a, b, l] of segs) {
       if (b <= a || l === 2) continue;
@@ -704,7 +800,7 @@ export class Wave {
     g.stroke();
     g.setLineDash([]);
     // Dense stretches.
-    g.fillStyle = C.sig;
+    g.fillStyle = sig;
     for (const [a, b] of busy) g.fillRect(a, yH, Math.max(1, b - a), yL - yH);
     // Contention on this pin.
     if (this.contention) {
@@ -763,10 +859,25 @@ export class Wave {
   shadeMiss(g, pinNo, top, hh, W) {
     const miss = this.missCache && this.missCache.get(pinNo);
     if (!miss || !miss.length) return;
-    g.fillStyle = 'rgba(200, 60, 40, 0.22)';
     for (const [a, b] of miss) {
       const xa = Math.max(LABEL_W, this.xOf(a)), xb = Math.min(W, this.xOf(b));
-      g.fillRect(xa, top, Math.max(2, xb - xa), hh - 1);
+      const w = Math.max(2, xb - xa);
+      g.fillStyle = 'rgba(255, 110, 95, 0.16)';
+      g.fillRect(xa, top, w, hh - 1);
+      // Hatching, so a mismatch reads without relying on colour alone.
+      g.save();
+      g.beginPath();
+      g.rect(xa, top, w, hh - 1);
+      g.clip();
+      g.strokeStyle = 'rgba(255, 110, 95, 0.45)';
+      g.lineWidth = 1;
+      g.beginPath();
+      for (let x = Math.floor(xa) - hh; x < xa + w; x += 6) { g.moveTo(x, top + hh); g.lineTo(x + hh, top); }
+      g.stroke();
+      g.restore();
+      g.fillStyle = 'rgba(255, 110, 95, 0.9)';
+      g.fillRect(xa, top, 1, hh - 1);
+      g.fillRect(xa + w - 1, top, 1, hh - 1);
     }
   }
 
@@ -796,10 +907,12 @@ export class Wave {
       }
       g.strokeStyle = C.exp;
       g.lineWidth = 2;
+      g.setLineDash([5, 3]);
       g.beginPath();
       g.moveTo(a, l === 1 ? yH : yL);
       g.lineTo(b, l === 1 ? yH : yL);
       g.stroke();
+      g.setLineDash([]);
     }
     // Vertical joins between expected segments.
     g.strokeStyle = C.exp;
@@ -820,8 +933,8 @@ export class Wave {
   drawIsr(g, r, top, hh, W, C) {
     const v1 = this.v0 + this.span * 1.02;
     const i0 = Math.max(0, upper(r.starts, this.v0) - 1);
-    g.fillStyle = C.exp;
-    g.globalAlpha = 0.75;
+    g.fillStyle = C.pc;
+    g.globalAlpha = 0.7;
     let lastX = -1;
     for (let i = Math.max(0, i0 - 1); i < r.spans.length; i++) {
       const [a, b] = r.spans[i];

@@ -2,7 +2,7 @@
 // watch expressions (with data watchpoints), registers, peripherals, memory and breakpoints.
 // Every view is read without side effects; edits go through the backend's assign/poke.
 
-import { h, put, btn, hex, fmtT, parseNum, ABI, VECTORS, basename, plural } from './util.js';
+import { h, put, btn, ibtn, icon, hex, fmtT, parseNum, ABI, VECTORS, basename, plural } from './util.js';
 
 const REASON = {
   start: 'Stopped at reset',
@@ -21,6 +21,7 @@ const REASON = {
 };
 
 const CPU = { running: 'running', sleeping: 'asleep in WFI', exited: 'exited', faulted: 'faulted' };
+const SEC_ICON = { stack: 'output', locals: 'vars', watch: 'clue', globals: 'library', regs: 'chip', periph: 'board', mem: 'disasm', bps: 'debug' };
 
 const DEFAULT_OPEN = { stack: true, locals: true, watch: true, globals: false, regs: false, periph: false, mem: false, bps: true };
 
@@ -45,6 +46,9 @@ export class DebugPanel {
     this.expanded = new Set();
     this.periphOpen = new Set();
     this.regOpen = new Set();
+    // Values at the previous stop, by tree key: a value that differs now is marked changed.
+    this.prevVals = new Map();
+    this.curVals = new Map();
     this.renderIdle();
   }
 
@@ -67,8 +71,9 @@ export class DebugPanel {
 
   renderIdle() {
     put(this.el, h('div', { class: 'dbg-idle' },
-      h('p', null, 'The debugger runs your firmware on the emulated chip one step at a time. Click in the gutter left of a line number to set a breakpoint, then press ',
-        h('span', { class: 'kbd' }, 'F5'), ' or Debug.'),
+      h('div', { class: 'pempty' }, icon('debug', { size: 22 }), h('b', null, 'Not debugging'),
+        h('span', null, 'The debugger runs your firmware on the emulated chip one step at a time. Click in the gutter left of a line number to set a breakpoint, then press ',
+          h('span', { class: 'kbd' }, 'F5'), ' or Debug.')),
       h('ul', null,
         h('li', null, h('span', { class: 'kbd' }, 'F10'), ' step over, ', h('span', { class: 'kbd' }, 'F11'), ' step into, ', h('span', { class: 'kbd' }, 'Shift+F11'), ' step out'),
         h('li', null, 'Step back runs time backwards: every stop can be undone.'),
@@ -79,6 +84,8 @@ export class DebugPanel {
 
   stop() {
     this.state = null;
+    this.prevVals = new Map();
+    this.curVals = new Map();
     this.running = false;
     this.stack = [];
     this.locals = [];
@@ -96,7 +103,7 @@ export class DebugPanel {
     const head = this.el.querySelector('.dbg-status');
     if (head) {
       head.classList.add('running');
-      put(head, h('div', { class: 'reason' }, 'Running…'), h('div', { class: 'meta' }, 't = ' + fmtT(this.runNow, 4) + (this.state ? ' of ' + fmtT(this.state.end, 3) : '')));
+      put(head, h('div', { class: 'state-chip' }, icon('spinner', { size: 13, class: 'rot' }), 'Running'), h('div', { class: 'reason' }, 'Running…'), h('div', { class: 'meta' }, 't = ' + fmtT(this.runNow, 4) + (this.state ? ' of ' + fmtT(this.state.end, 3) : '')));
     }
     this.el.classList.add('is-running');
   }
@@ -105,6 +112,9 @@ export class DebugPanel {
   async update(state) {
     this.running = false;
     this.el.classList.remove('is-running');
+    // A new stop: what was shown becomes the comparison for change marks.
+    this.prevVals = this.curVals;
+    this.curVals = new Map();
     this.state = state;
     this.frame = 0;
     try {
@@ -199,7 +209,7 @@ export class DebugPanel {
   section(key, title, body, badge, onOpen) {
     const open = this.isOpen(key);
     const head = h('button', { type: 'button', class: 'sec-h', 'aria-expanded': String(open) },
-      h('span', { class: 'tw' }, open ? '▾' : '▸'), h('span', null, title), badge ? h('span', { class: 'badge' }, badge) : null);
+      h('span', { class: 'tw' }, icon(open ? 'chev-down' : 'chev-right', { size: 13 })), icon(SEC_ICON[key] || 'dot', { size: 14, class: 'si' }), h('span', null, title), badge ? h('span', { class: 'badge' }, badge) : null);
     const sec = h('section', { class: 'dbg-sec' + (open ? ' open' : '') }, head);
     if (open) sec.append(h('div', { class: 'sec-b' }, body()));
     head.addEventListener('click', () => {
@@ -212,7 +222,10 @@ export class DebugPanel {
   statusBox() {
     const s = this.state;
     const reason = REASON[s.stop.reason] || s.stop.reason;
-    const box = h('div', { class: 'dbg-status' + (s.fault ? ' fault' : '') },
+    const over = s.cpu === 'faulted' || s.stop.reason === 'end' || s.cpu === 'exited';
+    const kind = s.fault || s.cpu === 'faulted' ? 'faulted' : over ? 'ended' : 'stopped';
+    const box = h('div', { class: 'dbg-status ' + kind + (s.fault ? ' fault' : '') },
+      h('div', { class: 'state-chip' }, icon(kind === 'faulted' ? 'fail' : kind === 'ended' ? 'flag' : 'pause', { size: 13 }), kind === 'faulted' ? 'Faulted' : kind === 'ended' ? 'Ended' : 'Stopped'),
       h('div', { class: 'reason' }, reason, s.stop.detail ? h('span', { class: 'detail' }, ' — ' + s.stop.detail) : null),
       h('div', { class: 'meta' },
         't = ' + fmtT(s.now, 4) + ' of ' + fmtT(s.end, 3),
@@ -236,7 +249,7 @@ export class DebugPanel {
       const li = h('li', { class: i === this.frame ? 'sel' : '', tabindex: '0' },
         h('span', { class: 'fn' }, (f.func || '??') + '()'),
         h('span', { class: 'at' }, where));
-      if (f.interrupt) li.append(h('div', { class: 'irq' }, '↑ interrupted by ' + (VECTORS[f.interrupt] || 'vector ' + f.interrupt)));
+      if (f.interrupt) li.append(h('div', { class: 'irq' }, icon('step-out', { size: 12 }), 'interrupted by ' + (VECTORS[f.interrupt] || 'vector ' + f.interrupt)));
       li.addEventListener('click', () => this.selectFrame(i));
       li.addEventListener('keydown', ev => { if (ev.key === 'Enter') this.selectFrame(i); });
       return li;
@@ -250,16 +263,25 @@ export class DebugPanel {
     const add = (v, key, depth, expr) => {
       const kids = v.children && v.children.length;
       const open = this.expanded.has(key);
-      const valEl = h('span', { class: 'v' + (v.value && v.value.startsWith('<') ? ' dim' : '') }, v.value);
-      const row = h('li', { style: { paddingLeft: (depth * 14 + 4) + 'px' } },
-        h('span', { class: 'tw' }, kids ? (open ? '▾' : '▸') : ''),
+      // Changed since the last stop: compared on the backend's own formatted values, never interpolated.
+      const was = this.prevVals.get(key);
+      this.curVals.set(key, v.value);
+      const changed = was !== undefined && was !== v.value;
+      const valEl = h('span', { class: 'v' + (v.value && v.value.startsWith('<') ? ' dim' : '') + (changed ? ' chg' : ''), 'data-tip': changed ? 'Was ' + was : null }, v.value);
+      const row = h('li', { style: { paddingLeft: (depth * 14 + 4) + 'px' }, tabindex: kids || (editable && v.addr !== null && v.addr !== undefined) ? '0' : null },
+        h('span', { class: 'tw' }, kids ? icon(open ? 'chev-down' : 'chev-right', { size: 12 }) : ''),
         h('span', { class: 'n' }, v.name),
         valEl,
         h('span', { class: 't' }, v.ty));
-      if (kids) row.addEventListener('click', () => { if (open) this.expanded.delete(key); else this.expanded.add(key); this.render(); });
-      else if (editable && v.addr !== null && v.addr !== undefined && !this.running) {
-        row.title = 'Double-click to change';
+      if (kids) {
+        const flip = () => { if (open) this.expanded.delete(key); else this.expanded.add(key); this.render(); };
+        row.addEventListener('click', flip);
+        row.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); flip(); } });
+        row.setAttribute('aria-expanded', String(open));
+      } else if (editable && v.addr !== null && v.addr !== undefined && !this.running) {
+        row.setAttribute('data-tip', 'Double-click or Enter to change');
         row.addEventListener('dblclick', () => this.editValue(expr, v));
+        row.addEventListener('keydown', ev => { if (ev.key === 'Enter') this.editValue(expr, v); });
       }
       if (v.addr !== null && v.addr !== undefined) {
         row.addEventListener('contextmenu', ev => {
@@ -283,14 +305,18 @@ export class DebugPanel {
 
   async editValue(expr, v) {
     const cur = String(v.value || '').split(' ')[0];
-    const nv = window.prompt('New value for ' + expr + ' (' + v.ty + '):', cur);
-    if (nv === null || !nv.trim()) return;
-    try {
-      await this.call('dbg_assign', { target: expr, value: nv.trim(), frame: this.frame });
-    } catch (err) {
-      this.ctx.toast(String(err.message || err));
-      return;
-    }
+    const frame = this.frame;
+    // The backend's refusal (a type mismatch, a read-only register) stays in the dialog for a retry.
+    const nv = await window.SN.dialog.prompt({
+      title: 'Change ' + expr, icon: 'rename', ok: 'Write it', label: 'New value (' + v.ty + ')',
+      input: { value: cur, mono: true, hint: 'Decimal, 0x hex, 0b binary, or a C expression. This writes the emulated machine, not your code.' },
+      validate: x => !x ? 'Give a value.' : null,
+      onSubmit: async x => {
+        if (!this.state || this.running) throw new Error('The core is running; pause it first.');
+        await this.call('dbg_assign', { target: expr, value: x, frame });
+      },
+    });
+    if (nv === null) return;
     this.afterEdit();
   }
 
@@ -311,11 +337,11 @@ export class DebugPanel {
     const rows = list.map((w, i) => {
       const val = this.watchVals[i];
       const armed = w.brk ? this.armed.find(a => a.expr === w.expr.trim()) : null;
+      const tip = w.brk ? (armed && armed.error ? 'Cannot watch: ' + armed.error : 'Breaks when this is written' + (armed ? ' (' + plural(armed.len, 'byte') + ' at ' + hex(armed.addr) + ')' : '')) : 'Break when this is written';
       const brk = h('button', {
         type: 'button', class: 'wbrk' + (w.brk ? ' on' : '') + (armed && armed.error ? ' bad' : ''),
-        title: w.brk ? (armed && armed.error ? 'Cannot watch: ' + armed.error : 'Breaks when this is written' + (armed ? ' (' + plural(armed.len, 'byte') + ' at ' + hex(armed.addr) + ')' : '')) : 'Break when this is written',
-        'aria-pressed': String(!!w.brk),
-      }, '●');
+        'data-tip': tip, 'aria-label': tip, 'aria-pressed': String(!!w.brk),
+      }, h('i'));
       brk.addEventListener('click', async ev => {
         ev.stopPropagation();
         const next = list.slice();
@@ -324,7 +350,7 @@ export class DebugPanel {
         await this.armWatches();
         this.render();
       });
-      const rm = h('button', { type: 'button', class: 'wrm', title: 'Remove' }, '×');
+      const rm = h('button', { type: 'button', class: 'wrm', 'aria-label': 'Remove the watch ' + w.expr, 'data-tip': 'Remove' }, icon('close', { size: 12 }));
       rm.addEventListener('click', async ev => {
         ev.stopPropagation();
         const next = list.slice();
@@ -340,24 +366,31 @@ export class DebugPanel {
       else body = this.tree([Object.assign({}, val, { name: '' })], 'w' + i, true, '', () => '(' + w.expr + ')');
       return h('div', { class: 'watch' }, h('div', { class: 'wh' }, brk, h('code', { class: 'we' }, w.expr), rm), body);
     });
-    return h('div', null, rows, h('div', { class: 'row' }, input, btn('Add', 'ghost small', addIt)));
+    return h('div', null, rows, h('div', { class: 'row watch-add' }, input, btn('Add', 'ghost small', addIt, null, 'plus')));
   }
 
   regsView() {
     const s = this.state;
     const grid = h('div', { class: 'regs' });
     const cell = (label, idx, v, changed, title) => {
-      const c = h('div', { class: 'reg' + (changed ? ' changed' : ''), title: title || '' },
+      const c = h('div', { class: 'reg' + (changed ? ' changed' : ''), 'data-tip': title || null },
         h('span', { class: 'rn' }, label), h('span', { class: 'rv' }, hex(v)));
       if (idx !== null && !this.running) {
-        c.addEventListener('dblclick', async () => {
-          const nv = window.prompt('New value for ' + label + ':', hex(v));
-          if (nv === null) return;
-          const n = parseNum(nv);
-          if (!isFinite(n)) { this.ctx.toast('That is not a number.'); return; }
-          try { await this.call('dbg_setreg', { idx, value: n >>> 0 }); } catch (err) { this.ctx.toast(String(err.message || err)); return; }
-          this.afterEdit();
-        });
+        c.tabIndex = 0;
+        const edit = async () => {
+          const nv = await window.SN.dialog.prompt({
+            title: 'Change ' + label, icon: 'chip', ok: 'Write it', label: 'New value',
+            input: { value: hex(v), mono: true, hint: 'Decimal, 0x hex or 0b binary.' },
+            validate: x => !isFinite(parseNum(x)) ? 'That is not a number.' : null,
+            onSubmit: async x => {
+              if (!this.state || this.running) throw new Error('The core is running; pause it first.');
+              await this.call('dbg_setreg', { idx, value: parseNum(x) >>> 0 });
+            },
+          });
+          if (nv !== null) this.afterEdit();
+        };
+        c.addEventListener('dblclick', edit);
+        c.addEventListener('keydown', ev => { if (ev.key === 'Enter') edit(); });
       }
       return c;
     };
@@ -377,8 +410,8 @@ export class DebugPanel {
     const out = h('div', { class: 'periph' });
     for (const b of this.periph) {
       const open = this.periphOpen.has(b.name);
-      const head = h('button', { type: 'button', class: 'pb-h' + (b.clocked ? '' : ' off') },
-        h('span', { class: 'tw' }, open ? '▾' : '▸'), h('span', { class: 'bn' }, b.name), b.clocked ? null : h('span', { class: 'off-note' }, 'clock off'));
+      const head = h('button', { type: 'button', class: 'pb-h' + (b.clocked ? '' : ' off'), 'aria-expanded': String(open) },
+        h('span', { class: 'tw' }, icon(open ? 'chev-down' : 'chev-right', { size: 12 })), h('span', { class: 'bn' }, b.name), b.clocked ? null : h('span', { class: 'off-note' }, 'clock off'));
       head.addEventListener('click', () => { if (open) this.periphOpen.delete(b.name); else this.periphOpen.add(b.name); this.render(); });
       out.append(head);
       if (!open) continue;
@@ -386,8 +419,8 @@ export class DebugPanel {
       for (const r of b.regs) {
         const key = b.name + '.' + r.name;
         const ro = this.regOpen.has(key);
-        const tr = h('tr', { class: 'pr' + (ro ? ' open' : ''), title: r.desc },
-          h('td', { class: 'nm' }, h('span', { class: 'tw' }, r.fields && r.fields.length ? (ro ? '▾' : '▸') : ''), r.name),
+        const tr = h('tr', { class: 'pr' + (ro ? ' open' : ''), 'data-tip': r.desc || null },
+          h('td', { class: 'nm' }, h('span', { class: 'tw' }, r.fields && r.fields.length ? icon(ro ? 'chev-down' : 'chev-right', { size: 11 }) : ''), r.name),
           h('td', { class: 'ad' }, hex(r.addr).slice(-4)),
           h('td', { class: 'val' }, r.value === null ? (r.access === 'WO' ? 'write-only' : '—') : hex(r.value)),
           h('td', { class: 'ac' }, r.access));
@@ -443,7 +476,7 @@ export class DebugPanel {
       this.render();
     };
     const bar = h('div', { class: 'row mem-bar' },
-      input, btn('Go', 'ghost small', go), btn('◂', 'ghost small icon', () => page(-1), { title: 'Previous 256 bytes' }), btn('▸', 'ghost small icon', () => page(1), { title: 'Next 256 bytes' }),
+      input, btn('Go', 'ghost small', go), ibtn('chev-left', 'Previous 256 bytes', () => page(-1), { cls: 'sm outline' }), ibtn('chev-right', 'Next 256 bytes', () => page(1), { cls: 'sm outline' }),
       btn('RAM', 'ghost small', () => { input.value = '0x20000000'; go(); }), btn('sp', 'ghost small', () => { input.value = hex(this.state.regs[2]); go(); }));
     const m = this.mem;
     if (!m) return h('div', null, bar, h('p', { class: 'dim' }, 'Loading…'));
@@ -474,14 +507,16 @@ export class DebugPanel {
             h('span', { class: 'dot' + (b.cond ? ' cond' : '') }),
             h('span', { class: 'bloc' }, basename(b.path) + ':' + b.line),
             b.cond ? h('code', { class: 'cond' }, b.cond) : null,
-            h('button', { type: 'button', class: 'wrm', title: 'Remove' }, '×'));
+            h('button', { type: 'button', class: 'wrm', 'aria-label': 'Remove the breakpoint at ' + basename(b.path) + ':' + b.line, 'data-tip': 'Remove' }, icon('close', { size: 12 })));
+          li.tabIndex = 0;
+          li.addEventListener('keydown', ev => { if (ev.key === 'Enter') this.ctx.gotoLine(b.path, b.line); if (ev.key === 'Delete') this.ctx.removeBp(b.path, b.line); });
           li.addEventListener('click', ev => {
-            if (ev.target.classList.contains('wrm')) this.ctx.removeBp(b.path, b.line);
+            if (ev.target.closest('.wrm')) this.ctx.removeBp(b.path, b.line);
             else this.ctx.gotoLine(b.path, b.line);
           });
           return li;
         })),
-        h('div', { class: 'row' }, btn('Remove all', 'ghost small', () => this.ctx.clearBps())));
+        h('div', { class: 'row' }, btn('Remove all', 'ghost small', () => this.ctx.clearBps(), null, 'delete')));
     };
     return this.section('bps', 'Breakpoints', body, list.length ? String(list.length) : null);
   }

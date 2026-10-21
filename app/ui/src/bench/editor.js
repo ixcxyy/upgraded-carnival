@@ -2,7 +2,7 @@
 // a breakpoint gutter (click to toggle, right-click for a condition) and the debugger's
 // current line.
 
-import { EditorState, StateField, StateEffect, RangeSet, RangeSetBuilder } from '@codemirror/state';
+import { EditorState, StateField, StateEffect, RangeSet, RangeSetBuilder, Compartment } from '@codemirror/state';
 import {
   EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection,
   gutter, GutterMarker, Decoration, highlightSpecialChars, rectangularSelection, dropCursor,
@@ -124,23 +124,37 @@ const pcField = StateField.define({
 });
 
 // ── look ──
+// Colours come from the shared tokens, so one spec serves both appearances. CodeMirror still
+// needs to know which one is showing (its own defaults for panels and selection depend on
+// it), so the theme sits in a compartment and is reconfigured in place: switching never
+// recreates a document, its history or its breakpoints.
 
-const theme = EditorView.theme({
-  '&': { height: '100%', fontSize: 'var(--code-fs, 13.5px)', backgroundColor: 'var(--code-bg)', color: 'var(--ink)' },
-  '.cm-scroller': { fontFamily: 'var(--f-mono)', lineHeight: '1.55' },
-  '.cm-content': { caretColor: 'var(--ink)' },
-  '.cm-gutters': { backgroundColor: 'var(--code-gutter)', color: 'var(--ink-3)', borderRight: '1px solid var(--rule)' },
+const themeSpec = {
+  '&': { height: '100%', fontSize: 'var(--code-fs, 13.5px)', backgroundColor: 'var(--code-bg)', color: 'var(--text)' },
+  '.cm-scroller': { fontFamily: 'var(--f-mono)', lineHeight: '1.6' },
+  '.cm-content': { caretColor: 'var(--accent)', padding: '10px 0 40vh' },
+  '.cm-gutters': { backgroundColor: 'var(--code-gutter)', color: 'var(--text-4)', border: 'none' },
+  '.cm-lineNumbers .cm-gutterElement': { padding: '0 10px 0 6px', minWidth: '3ch' },
   '.cm-activeLine': { backgroundColor: 'var(--code-active)' },
-  '.cm-activeLineGutter': { backgroundColor: 'var(--code-active)' },
+  '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--text-2)' },
   '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection': { backgroundColor: 'var(--code-sel) !important' },
-  '.cm-cursor': { borderLeftColor: 'var(--ink)' },
-  '.cm-bp-gutter': { width: '14px', cursor: 'pointer' },
+  '.cm-cursor': { borderLeftColor: 'var(--accent)', borderLeftWidth: '2px' },
+  '.cm-bp-gutter': { width: '16px', cursor: 'pointer' },
   '.cm-bp-gutter .cm-gutterElement': { padding: '0 1px' },
-  '.cm-pc-line': { backgroundColor: 'var(--code-pc) !important' },
-  '.cm-tooltip': { backgroundColor: 'var(--surface)', border: '1px solid var(--rule)', color: 'var(--ink)' },
-  '.cm-panels': { backgroundColor: 'var(--surface-2)', color: 'var(--ink)' },
+  '.cm-pc-line': { backgroundColor: 'var(--pc-soft) !important' },
+  '.cm-tooltip': { backgroundColor: 'var(--panel-2)', border: '1px solid var(--line-2)', color: 'var(--text)', borderRadius: '9px', overflow: 'hidden' },
+  '.cm-panels': { backgroundColor: 'var(--panel-2)', color: 'var(--text)' },
+  '.cm-panels.cm-panels-bottom': { borderTop: '1px solid var(--line-2)' },
   '.cm-searchMatch': { backgroundColor: 'var(--code-find)' },
-}, { dark: false });
+  '.cm-matchingBracket, &.cm-focused .cm-matchingBracket': { backgroundColor: 'var(--accent-soft)', outline: '1px solid var(--accent-line)' },
+  '.cm-selectionMatch': { backgroundColor: 'var(--accent-soft)' },
+};
+const themes = { dark: EditorView.theme(themeSpec, { dark: true }), light: EditorView.theme(themeSpec, { dark: false }) };
+const themeConf = new Compartment();
+/** Whether the page is showing its dark appearance (the theme setting, or the system's). */
+function pageDark() {
+  try { return getComputedStyle(document.documentElement).colorScheme.indexOf('light') < 0; } catch (err) { return true; }
+}
 
 const hl = HighlightStyle.define([
   { tag: [t.keyword, t.controlKeyword, t.modifier], color: 'var(--syn-kw)', fontWeight: '500' },
@@ -163,8 +177,23 @@ export class Editor {
     this.states = new Map();
     this.meta = new Map();
     this.path = null;
-    this.view = new EditorView({ parent, state: EditorState.create({ doc: '', extensions: [theme, EditorState.readOnly.of(true)] }) });
+    this.dark = pageDark();
+    this.view = new EditorView({ parent, state: this.blank() });
     this.view.dom.classList.add('cm-empty');
+  }
+
+  blank() {
+    return EditorState.create({ doc: '', extensions: [themeConf.of(themes[this.dark ? 'dark' : 'light']), EditorState.readOnly.of(true)] });
+  }
+
+  /** Follow the page's appearance; every open document keeps its text, history and marks. */
+  setDark(dark) {
+    const d = dark === undefined ? pageDark() : !!dark;
+    if (d === this.dark) return;
+    this.dark = d;
+    const effects = themeConf.reconfigure(themes[d ? 'dark' : 'light']);
+    for (const [p, st] of this.states) if (p !== this.path) this.states.set(p, st.update({ effects }).state);
+    this.view.dispatch({ effects });
   }
 
   extensions(path, readonly) {
@@ -192,7 +221,7 @@ export class Editor {
       cpp(),
       syntaxHighlighting(hl),
       pcField,
-      theme,
+      themeConf.of(themes[self.dark ? 'dark' : 'light']),
       EditorState.readOnly.of(!!readonly),
       EditorView.editable.of(!readonly),
       keymap.of([
@@ -224,10 +253,19 @@ export class Editor {
   editCondition(view, line) {
     const cur = condOf(view.state, line.from);
     const lineNo = view.state.doc.lineAt(line.from).number;
-    const v = window.prompt('Break on line ' + lineNo + ' only when this is true (a C expression; empty for always):', cur || '');
-    if (v === null) return;
-    view.dispatch({ effects: bpEffect.of({ pos: line.from, on: true, cond: v.trim() || null }) });
-    this.hooks.onBreakpoints && this.hooks.onBreakpoints(this.path, bpsOf(view.state));
+    const path = this.path;
+    window.SN.dialog.prompt({
+      title: 'Breakpoint condition', icon: 'debug', ok: 'Set breakpoint',
+      label: 'Break on line ' + lineNo + ' only when this is true',
+      input: { value: cur || '', mono: true, placeholder: 'count == 3', hint: 'A C expression. Leave it empty to break every time.' },
+    }).then(v => {
+      if (v === null || this.path !== path) return;
+      // The line may have moved while the dialog was up: find it again by number.
+      const st = this.view.state;
+      if (lineNo > st.doc.lines) return;
+      this.view.dispatch({ effects: bpEffect.of({ pos: st.doc.line(lineNo).from, on: true, cond: v || null }) });
+      this.hooks.onBreakpoints && this.hooks.onBreakpoints(this.path, bpsOf(this.view.state));
+    });
   }
 
   toggleAtCursor(view) {
@@ -297,7 +335,7 @@ export class Editor {
   close(path) {
     if (this.path === path) {
       this.path = null;
-      this.view.setState(EditorState.create({ doc: '', extensions: [theme, EditorState.readOnly.of(true)] }));
+      this.view.setState(this.blank());
       this.view.dom.classList.add('cm-empty');
     }
     this.states.delete(path);
@@ -346,6 +384,16 @@ export class Editor {
       return { from, to: Math.max(to, from), severity: d.severity === 'error' ? 'error' : d.severity === 'warning' ? 'warning' : 'info', message: d.message };
     });
     this.update(path, setDiagnostics(st, list));
+  }
+
+  /** Brief acknowledgement on the program-counter line (the line itself is the backend's). */
+  flashPc(kind) {
+    const d = this.view.dom;
+    clearTimeout(this.flashT);
+    d.classList.remove('pc-back', 'pc-fwd');
+    void d.offsetWidth;
+    d.classList.add(kind === 'back' ? 'pc-back' : 'pc-fwd');
+    this.flashT = setTimeout(() => d.classList.remove('pc-back', 'pc-fwd'), 700);
   }
 
   setPc(path, line) {

@@ -1,7 +1,7 @@
 // The board the task runs on: which pin is wired to what, which way it points, and — while
 // the debugger holds the core — the level on every pin right now.
 
-import { h, put } from './util.js';
+import { h, put, icon } from './util.js';
 
 const LV = ['LOW', 'HIGH', 'floating'];
 
@@ -34,20 +34,24 @@ export class BoardView {
   render() {
     const I = this.info;
     if (!I) { put(this.el); return; }
+    // Every row is the level's own pin record: name, label, direction, note. Levels only while the
+    // debugger holds the core, straight from its snapshot.
     const rows = I.pins.map(p => {
       const lv = this.levels ? this.levels[p.pin] : null;
       return h('tr', null,
-        h('td', { class: 'pn' }, p.name),
-        h('td', { class: 'dir' }, p.dir === 'in' ? '← in' : '→ out'),
+        h('td', { class: 'pn mono' }, p.name),
+        h('td', { class: 'dir' }, h('span', { class: 'dirtag ' + (p.dir === 'in' ? 'in' : 'out') }, icon(p.dir === 'in' ? 'chev-left' : 'chev-right', { size: 12 }), p.dir === 'in' ? 'in' : 'out')),
         h('td', { class: 'lb' }, h('b', null, p.label), p.note ? h('div', { class: 'note' }, p.note) : null),
         h('td', { class: 'lv' }, lv === null || lv === undefined ? h('span', { class: 'dim' }, '—')
-          : h('span', { class: 'led l' + lv, title: LV[lv] }, h('i'), LV[lv])));
+          : h('span', { class: 'led l' + lv, 'aria-label': LV[lv] }, h('i'), LV[lv])));
     });
     const kb = n => (n >= 1024 ? (n / 1024).toFixed(1) + ' KB' : n + ' B');
     put(this.el,
       h('div', { class: 'mcu' },
-        h('div', { class: 'mcu-h' }, 'K28'),
-        h('div', { class: 'mcu-s' }, 'RV32IMC · 100 MHz · 256 KB flash · 64 KB RAM')),
+        h('div', { class: 'mcu-chip', 'aria-hidden': 'true' }, icon('chip', { size: 26 })),
+        h('div', null,
+          h('div', { class: 'mcu-h' }, 'K28'),
+          h('div', { class: 'mcu-s mono' }, 'RV32IMC · 100 MHz · 256 KB flash · 64 KB RAM'))),
       h('table', { class: 'pins-t' },
         h('thead', null, h('tr', null, h('th', null, 'Pin'), h('th', null, 'Way'), h('th', null, 'Wired to'), h('th', null, this.levels ? 'Now' : 'Level'))),
         h('tbody', null, rows)),
@@ -56,7 +60,7 @@ export class BoardView {
       h('div', { class: 'facts' },
         h('div', null, h('span', null, 'Startup code'), h('b', null, I.startup ? 'sdk/startup.S is linked in' : 'none — your firmware provides the boot header and reset path')),
         h('div', null, h('span', null, 'Your library'), h('b', null, I.library ? 'lib/*.c is linked in' : 'not linked in (exam rules)')),
-        h('div', null, h('span', null, 'Hidden seeds'), h('b', null, String(I.hidden_seeds))),
-        this.sizes ? h('div', null, h('span', null, 'Last build'), h('b', null, 'flash ' + kb(this.sizes.flash) + ' · RAM ' + kb(this.sizes.ram) + ' (text ' + kb(this.sizes.text) + ', rodata ' + kb(this.sizes.rodata) + ', data ' + kb(this.sizes.data) + ', bss ' + kb(this.sizes.bss) + ')')) : null));
+        h('div', null, h('span', null, 'Hidden seeds'), h('b', { class: 'mono' }, String(I.hidden_seeds))),
+        this.sizes ? h('div', null, h('span', null, 'Last build'), h('b', { class: 'mono' }, 'flash ' + kb(this.sizes.flash) + ' · RAM ' + kb(this.sizes.ram) + ' (text ' + kb(this.sizes.text) + ', rodata ' + kb(this.sizes.rodata) + ', data ' + kb(this.sizes.data) + ', bss ' + kb(this.sizes.bss) + ')')) : null));
   }
 }

@@ -12,7 +12,7 @@ import { renderRun, renderSubmit, renderConsole } from './results.js';
 import { BoardView } from './board.js';
 import { Datasheet } from './datasheet.js';
 import DATASHEET from '../../../../content/sdk/datasheet.html';
-import { h, put, btn, $, fmtT, basename, plural, hex } from './util.js';
+import { h, put, btn, ibtn, icon, $, fmtT, basename, plural, hex } from './util.js';
 
 const call = (cmd, args) => window.K28.call(cmd, args || {});
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -42,6 +42,9 @@ const S = {
   traceStale: false,
   disasmStale: false,
   bpTouched: new Set(),
+  fileState: new Map(), // path → 'saving' | 'failed' | 'saved' (what the last write did)
+  deleting: new Set(),
+  analysed: false,
 };
 
 let ui = null;
@@ -76,53 +79,37 @@ function persist(now) {
 function P() {
   return S.bridge.profile();
 }
-function toast(m) {
-  S.bridge.toast(m);
+function toast(m, iconName) {
+  S.bridge.toast(m, iconName);
 }
 
 // ───────────────────────── small UI pieces ─────────────────────────
 
-function tabStrip(list, onSel, cls) {
-  const el = h('div', { class: 'ptabs ' + (cls || ''), role: 'tablist' });
-  const btns = {};
-  for (const [key, label, title] of list) {
-    const b = h('button', { type: 'button', class: 'ptab', role: 'tab', title: title || '' }, label, h('span', { class: 'dot', hidden: true }));
-    b.addEventListener('click', () => onSel(key));
-    btns[key] = b;
-    el.append(b);
-  }
-  return {
-    el,
-    btns,
-    select(k) {
-      for (const key in btns) btns[key].setAttribute('aria-selected', String(key === k));
-      if (btns[k]) btns[k].querySelector('.dot').hidden = true;
-    },
-    dot(k, on) {
-      if (btns[k]) btns[k].querySelector('.dot').hidden = !on;
-    },
-    show(k, on) {
-      if (btns[k]) btns[k].hidden = !on;
-    },
-  };
-}
-
 function splitter(kind, onDrag) {
-  const el = h('div', { class: 'split split-' + kind, role: 'separator', 'aria-orientation': kind === 'v' ? 'vertical' : 'horizontal' });
-  el.addEventListener('mousedown', ev => {
+  const el = h('div', { class: 'split split-' + kind, role: 'separator', tabindex: '0', 'aria-orientation': kind === 'v' ? 'vertical' : 'horizontal',
+    'aria-label': kind === 'v' ? 'Resize the panel (arrow keys)' : 'Resize the analysis area (arrow keys)' });
+  el.addEventListener('pointerdown', ev => {
+    if (ev.button !== 0) return;
     ev.preventDefault();
     const start = kind === 'v' ? ev.clientX : ev.clientY;
     const begin = onDrag(0, true);
     document.body.classList.add(kind === 'v' ? 'dragging-v' : 'dragging-h');
     const move = e => onDrag((kind === 'v' ? e.clientX : e.clientY) - start, false, begin);
     const up = () => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
       document.body.classList.remove('dragging-v', 'dragging-h');
       persist();
     };
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  });
+  el.addEventListener('keydown', ev => {
+    const keys = kind === 'v' ? { ArrowLeft: -16, ArrowRight: 16 } : { ArrowUp: -16, ArrowDown: 16 };
+    if (!(ev.key in keys)) return;
+    ev.preventDefault();
+    onDrag(keys[ev.key], false, onDrag(0, true));
+    persist();
   });
   return el;
 }
@@ -133,8 +120,8 @@ function closeMenu() {
 }
 function menu(x, y, items) {
   closeMenu();
-  menuEl = h('div', { class: 'bmenu', role: 'menu' }, items.filter(Boolean).map(([label, fn, danger]) => {
-    const b = h('button', { type: 'button', role: 'menuitem', class: danger ? 'danger' : '' }, label);
+  menuEl = h('div', { class: 'bmenu', role: 'menu' }, items.filter(Boolean).map(([label, fn, danger, iconName]) => {
+    const b = h('button', { type: 'button', role: 'menuitem', class: danger ? 'danger' : '' }, iconName ? icon(iconName) : null, label);
     b.addEventListener('click', () => { closeMenu(); fn(); });
     return b;
   }));
@@ -142,6 +129,14 @@ function menu(x, y, items) {
   const r = menuEl.getBoundingClientRect();
   menuEl.style.left = Math.min(x, window.innerWidth - r.width - 8) + 'px';
   menuEl.style.top = Math.min(y, window.innerHeight - r.height - 8) + 'px';
+  const first = menuEl.querySelector('button');
+  if (first) first.focus();
+  menuEl.addEventListener('keydown', ev => {
+    const all = Array.from(menuEl.querySelectorAll('button'));
+    const i = all.indexOf(document.activeElement);
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') { ev.preventDefault(); all[(i + (ev.key === 'ArrowDown' ? 1 : all.length - 1)) % all.length].focus(); }
+    if (ev.key === 'Escape' || ev.key === 'Tab') { ev.preventDefault(); closeMenu(); }
+  });
   setTimeout(() => document.addEventListener('mousedown', function off(ev) {
     if (menuEl && !menuEl.contains(ev.target)) { closeMenu(); document.removeEventListener('mousedown', off); }
   }), 0);
@@ -149,52 +144,111 @@ function menu(x, y, items) {
 
 // ───────────────────────── building the bench ─────────────────────────
 
+function dockBtn(name, label, kbd, onclick, cls) {
+  const b = h('button', { type: 'button', class: 'dock-btn ' + (cls || ''), 'aria-label': label, 'data-tip': label, 'data-kbd': kbd || null, 'aria-keyshortcuts': kbd ? kbd.replace(/\s/g, '') : null, 'data-tip-at': 'below' },
+    icon(name, { size: 17 }), h('span', { class: 'dcap' }, label.split(' ')[0]));
+  b.addEventListener('click', onclick);
+  return b;
+}
+
+/** A vertical icon rail of panel tabs (the inspector) or a horizontal strip (the analysis area). */
+function railTabs(list, onSel, cls, vertical) {
+  const el = h('div', { class: 'ptabs ' + (cls || ''), role: 'tablist', 'aria-orientation': vertical ? 'vertical' : 'horizontal' });
+  const btns = {};
+  for (const [key, label, iconName, title] of list) {
+    const b = h('button', { type: 'button', class: 'ptab', role: 'tab', 'aria-label': vertical ? label : null, 'data-tip': title || label, 'data-tip-at': vertical ? null : 'below' },
+      icon(iconName, { size: vertical ? 19 : 15 }), h('span', { class: 'pl' }, label), h('span', { class: 'dot', hidden: true }));
+    b.addEventListener('click', () => onSel(key));
+    btns[key] = b;
+    el.append(b);
+  }
+  el.addEventListener('keydown', ev => {
+    const keys = vertical ? ['ArrowUp', 'ArrowDown'] : ['ArrowLeft', 'ArrowRight'];
+    const i = keys.indexOf(ev.key);
+    if (i < 0) return;
+    const all = Object.values(btns).filter(b => !b.hidden);
+    const at = all.indexOf(document.activeElement);
+    if (at < 0) return;
+    ev.preventDefault();
+    all[(at + (i ? 1 : all.length - 1)) % all.length].focus();
+  });
+  let ind = null;
+  return {
+    el,
+    btns,
+    select(k) {
+      for (const key in btns) btns[key].setAttribute('aria-selected', String(key === k));
+      if (btns[k]) btns[k].querySelector('.dot').hidden = true;
+      if (window.SN) {
+        if (!ind) ind = window.SN.indicator(el);
+        requestAnimationFrame(() => ind.move(btns[k]));
+      }
+    },
+    refresh() { if (ind) ind.refresh(); },
+    dot(k, on) {
+      if (btns[k]) btns[k].querySelector('.dot').hidden = !on;
+    },
+    show(k, on) {
+      if (btns[k]) btns[k].hidden = !on;
+    },
+  };
+}
+
 function buildUi() {
   const root = $('#bench');
   ui = { root };
-  const d = (label, title, fn, cls) => btn(label, 'ghost small dbtn ' + (cls || ''), fn, { title });
 
-  ui.back = btn('← Story', 'ghost small', () => close(), { title: 'Back to the story. Your code is saved as you type.' });
+  ui.back = h('button', { type: 'button', class: 'bh-back', 'data-tip': 'Back to the story. Your code is saved as you type.', 'data-tip-at': 'below' }, icon('back'), h('span', null, 'Story'));
+  ui.back.addEventListener('click', () => close());
   ui.code = h('span', { class: 'bt-code' });
   ui.name = h('span', { class: 'bt-name' });
   ui.chip = h('span', { class: 'bt-chip' });
-  ui.build = btn('Build', 'ghost small', () => doBuild(), { title: 'Compile and link (Ctrl+B)' });
-  ui.run = btn('Run', 'ghost small', () => doRun(), { title: 'Run on the chosen seed and capture every pin (Ctrl+Enter)' });
-  ui.debug = btn('Debug', 'ghost small', () => doDebug(), { title: 'Start the debugger and stop at main (F5)' });
-  ui.submit = btn('Submit', 'primary small', () => doSubmit(), { title: 'Run every seed, the hidden ones too, and hand it in (Ctrl+Shift+Enter)' });
-  ui.acts = h('div', { class: 'bb-acts' }, ui.build, ui.run, ui.debug, ui.submit);
 
-  ui.dCont = d('▶ Continue', 'Continue (F5)', () => dbgCmd('continue'), 'go');
-  ui.dPause = d('❚❚ Pause', 'Pause (F6)', () => dbgPause());
-  ui.dOver = d('Over', 'Step over this line (F10)', () => dbgCmd('step_over'));
-  ui.dInto = d('Into', 'Step into the call on this line (F11)', () => dbgCmd('step_into'));
-  ui.dOut = d('Out', 'Run until this function returns (Shift+F11)', () => dbgCmd('step_out'));
-  ui.dBack = d('◂ Back', 'Step back one line: time runs backwards (Shift+F10)', () => dbgCmd('step_back'));
-  ui.dRestart = d('↺', 'Restart from reset; rebuilds first if the code changed (Ctrl+Shift+F5)', () => dbgRestart());
-  ui.dStop = d('■ Stop', 'Stop debugging (Shift+F5)', () => dbgStop(), 'stop');
-  ui.dTime = h('span', { class: 'dtime' });
-  ui.dbgBar = h('div', { class: 'bb-dbg', hidden: true }, ui.dCont, ui.dPause, ui.dOver, ui.dInto, ui.dOut, ui.dBack, ui.dRestart, ui.dStop, ui.dTime);
+  ui.build = dockBtn('build', 'Build', 'Ctrl+B', () => doBuild(), 'b-build');
+  ui.run = dockBtn('run', 'Run on the chosen seed', 'Ctrl+Enter', () => doRun(), 'b-run');
+  ui.debug = dockBtn('debug', 'Debug from main', 'F5', () => doDebug(), 'b-debug');
+  ui.submit = dockBtn('submit', 'Submit every seed', 'Ctrl+Shift+Enter', () => doSubmit(), 'b-submit');
+  ui.acts = h('div', { class: 'dock-group bb-acts', role: 'toolbar', 'aria-label': 'Build, run, debug and submit' }, ui.build, ui.run, ui.debug, ui.submit);
 
-  ui.seed = h('select', { class: 'seed-sel', title: 'The seed Run and Debug use. Submitting runs every seed.', 'aria-label': 'Seed' });
+  ui.dCont = dockBtn('continue', 'Continue', 'F5', () => dbgCmd('continue'), 'go');
+  ui.dPause = dockBtn('pause', 'Pause', 'F6', () => dbgPause(), 'go');
+  ui.dOver = dockBtn('step-over', 'Step over', 'F10', () => dbgCmd('step_over'));
+  ui.dInto = dockBtn('step-into', 'Step into', 'F11', () => dbgCmd('step_into'));
+  ui.dOut = dockBtn('step-out', 'Step out', 'Shift+F11', () => dbgCmd('step_out'));
+  ui.dBack = dockBtn('step-back', 'Step back one line (time runs backwards)', 'Shift+F10', () => dbgCmd('step_back'), 'rev');
+  ui.dRestart = dockBtn('restart', 'Restart from reset (rebuilds if the code changed)', 'Ctrl+Shift+F5', () => dbgRestart());
+  ui.dStop = dockBtn('stop', 'Stop debugging', 'Shift+F5', () => dbgStop(), 'stop');
+  ui.dTime = h('span', { class: 'dtime mono', 'aria-live': 'off' });
+  ui.dbgBar = h('div', { class: 'dock-group bb-dbg', role: 'toolbar', 'aria-label': 'Debugger', hidden: true },
+    ui.dCont, ui.dPause, h('span', { class: 'dock-sep' }), ui.dOver, ui.dInto, ui.dOut, ui.dBack, h('span', { class: 'dock-sep' }), ui.dRestart, ui.dStop, ui.dTime);
+  ui.dock = h('div', { class: 'cmd-dock glass' }, ui.acts, ui.dbgBar);
+
+  ui.seed = h('select', { class: 'seed-sel', 'data-tip': 'The seed Run and Debug use. Submitting runs every seed.', 'data-tip-at': 'below', 'aria-label': 'Seed' });
   ui.seed.addEventListener('change', () => { S.seed = +ui.seed.value; TS().seed = S.seed; persist(); });
   ui.ownBox = h('input', { type: 'checkbox' });
   ui.ownBox.addEventListener('change', () => { TS().own = ui.ownBox.checked; persist(); });
-  ui.own = h('label', { class: 'own', hidden: true }, ui.ownBox, h('span', null, 'Own check'));
+  ui.own = h('label', { class: 'own switch', hidden: true }, ui.ownBox, h('span', { class: 'track', 'aria-hidden': 'true' }), h('span', null, 'Own check'));
   ui.status = h('div', { class: 'bb-status', role: 'status', 'aria-live': 'polite' });
-  ui.bar = h('div', { class: 'bb' },
+  ui.focusBtn = ibtn('focus', 'Focus the editor', () => toggleFocus('editor'), { kbd: 'Ctrl+Shift+E', at: 'below', cls: 'outline' });
+  ui.bar = h('header', { class: 'bb' },
     ui.back,
     h('div', { class: 'bt' }, ui.code, ui.name, ui.chip),
-    ui.acts, ui.dbgBar,
-    h('div', { class: 'bb-opts' }, ui.seed, ui.own),
-    ui.status);
+    ui.dock,
+    h('div', { class: 'bb-opts' }, h('span', { class: 'seed-wrap' }, icon('flag', { size: 14 }), ui.seed), ui.own),
+    ui.status,
+    ui.focusBtn);
 
-  ui.banner = h('div', { class: 'bbanner', hidden: true });
+  ui.banner = h('div', { class: 'bbanner', hidden: true, role: 'status' });
 
   // Files.
+  ui.filesHead = h('div', { class: 'pane-h' }, h('span', { class: 'pane-t' }, icon('files'), 'Files'),
+    ibtn('panel-left', 'Hide files', () => setPane('files', false), { cls: 'sm' }));
   ui.files = h('nav', { class: 'bfiles', 'aria-label': 'Files' });
+  ui.filesRail = h('div', { class: 'pane-rail' }, ibtn('files', 'Show files', () => setPane('files', true), { cls: 'sm' }));
+  ui.filePane = h('div', { class: 'bpane bpane-files' }, ui.filesHead, ui.files, ui.filesRail);
 
   // Editor.
-  ui.edtabs = h('div', { class: 'edtabs', role: 'tablist' });
+  ui.edtabs = h('div', { class: 'edtabs', role: 'tablist', 'aria-label': 'Open files' });
   ui.edhost = h('div', { class: 'edhost' });
   editor = new Editor(ui.edhost, {
     onChange: onEdit,
@@ -205,28 +259,35 @@ function buildUi() {
 
   // Bottom panels.
   ui.bp = {};
-  for (const k of ['wave', 'output', 'console', 'results', 'disasm']) ui.bp[k] = h('div', { class: 'bpanel bp-' + k, hidden: true });
-  ui.btabs = tabStrip([
-    ['wave', 'Waveform', 'Every pin over time'],
-    ['results', 'Results', 'What the checker said'],
-    ['console', 'Console', 'What the firmware wrote to DBGCON'],
-    ['output', 'Build', 'Compiler and linker output'],
-    ['disasm', 'Disassembly', 'The machine code around the program counter'],
-  ], k => selectBottom(k));
+  for (const k of ['wave', 'output', 'console', 'results', 'disasm']) ui.bp[k] = h('div', { class: 'bpanel bp-' + k, hidden: true, role: 'tabpanel' });
+  ui.btabs = railTabs([
+    ['wave', 'Waveform', 'wave', 'Every pin over time'],
+    ['results', 'Results', 'results', 'What the checker said'],
+    ['console', 'Console', 'console', 'What the firmware wrote to DBGCON'],
+    ['output', 'Build', 'output', 'Compiler and linker output'],
+    ['disasm', 'Disassembly', 'disasm', 'The machine code around the program counter'],
+  ], k => { selectBottom(k); setPane('bottom', true); }, 'btabs');
+  ui.bFocus = ibtn('focus', 'Enlarge the analysis area', () => toggleFocus('wave'), { cls: 'sm', at: 'below' });
+  ui.bToggle = ibtn('chev-down', 'Hide the analysis area', () => setPane('bottom', !paneOpen('bottom')), { cls: 'sm', kbd: 'Ctrl+J', at: 'below' });
   wave = new Wave(ui.bp.wave, {
     onGoto: t => dbgCmd('goto_time', { t }),
+    onRun: () => doRun(),
   });
-  ui.bottom = h('div', { class: 'bottom' }, ui.btabs.el, h('div', { class: 'bpanels' }, Object.values(ui.bp)));
+  ui.bottom = h('div', { class: 'bottom' }, h('div', { class: 'bstrip' }, ui.btabs.el, h('span', { class: 'grow' }), ui.bFocus, ui.bToggle), h('div', { class: 'bpanels' }, Object.values(ui.bp)));
 
-  // Side panels.
+  // Inspector: content, then its rail of tabs.
   ui.sp = {};
-  for (const k of ['work', 'board', 'debug', 'datasheet']) ui.sp[k] = h('div', { class: 'spanel sp-' + k, hidden: true });
-  ui.stabs = tabStrip([
-    ['work', 'Work order'],
-    ['board', 'Board'],
-    ['debug', 'Debug'],
-    ['datasheet', 'Datasheet'],
-  ], k => selectSide(k));
+  for (const k of ['work', 'board', 'debug', 'datasheet']) ui.sp[k] = h('div', { class: 'spanel sp-' + k, hidden: true, role: 'tabpanel' });
+  ui.stabs = railTabs([
+    ['work', 'Work order', 'work'],
+    ['board', 'Board', 'board', 'Board: pins and live levels'],
+    ['debug', 'Debug', 'debug', 'Debugger: stack, variables, watches, registers'],
+    ['datasheet', 'Datasheet', 'datasheet', 'K28 datasheet: search and contents'],
+  ], k => {
+    if (L().stab === k && paneOpen('side')) { setPane('side', false); return; }
+    selectSide(k);
+    setPane('side', true);
+  }, 'stabs', true);
   board = new BoardView(ui.sp.board);
   dbgPanel = new DebugPanel(ui.sp.debug, {
     call,
@@ -242,40 +303,103 @@ function buildUi() {
     gotoFrame: (p, l) => { if (inWorkspace(p)) gotoLine(p, l, true); },
     edited: () => { S.traceStale = true; S.disasmStale = true; refreshVisibleBottom(); },
   });
-  ui.side = h('aside', { class: 'bside' }, ui.stabs.el, h('div', { class: 'spanels' }, Object.values(ui.sp)));
+  ui.sideHead = h('div', { class: 'pane-h' }, ui.sideTitle = h('span', { class: 'pane-t' }),
+    ibtn('panel-right', 'Hide the inspector', () => setPane('side', false), { cls: 'sm' }));
+  ui.side = h('aside', { class: 'bside' }, ui.sideHead, h('div', { class: 'spanels' }, Object.values(ui.sp)));
 
   ui.center = h('div', { class: 'bcenter' },
-    ui.edtabs, ui.edhost,
-    splitter('h', (d, start, begin) => {
+    h('div', { class: 'edpane' }, ui.edtabs, ui.edhost),
+    ui.hsplit = splitter('h', (d, start, begin) => {
       if (start) return L().bottom;
-      L().bottom = Math.max(120, Math.min(window.innerHeight - 220, begin - d));
+      L().bottom = Math.max(150, Math.min(window.innerHeight - 220, begin - d));
       applyLayout();
     }),
     ui.bottom);
   ui.body = h('div', { class: 'bb-body' },
-    ui.files,
-    splitter('v', (d, start, begin) => {
+    ui.filePane,
+    ui.lsplit = splitter('v', (d, start, begin) => {
       if (start) return L().left;
-      L().left = Math.max(130, Math.min(420, begin + d));
+      L().left = Math.max(150, Math.min(420, begin + d));
       applyLayout();
     }),
     ui.center,
-    splitter('v', (d, start, begin) => {
+    ui.rsplit = splitter('v', (d, start, begin) => {
       if (start) return L().right;
-      L().right = Math.max(280, Math.min(Math.round(window.innerWidth * 0.55), begin - d));
+      L().right = Math.max(300, Math.min(Math.round(window.innerWidth * 0.5), begin - d));
       applyLayout();
     }),
-    ui.side);
+    ui.side,
+    ui.stabs.el);
+  ui.lsplit.classList.add('split-l');
+  ui.rsplit.classList.add('split-r');
   root.append(ui.bar, ui.banner, ui.body);
   applyLayout();
+  window.addEventListener('resize', () => { if (isOpen()) applyLayout(); });
 }
 
+/** Saved sizes, clamped to the window we have now (a layout saved on a big screen still fits a small one). */
 function applyLayout() {
   const l = L();
-  ui.root.style.setProperty('--bl', l.left + 'px');
-  ui.root.style.setProperty('--br', l.right + 'px');
-  ui.root.style.setProperty('--bh', l.bottom + 'px');
+  const W = window.innerWidth, H = window.innerHeight;
+  const left = Math.max(150, Math.min(l.left, Math.round(W * 0.22)));
+  const right = Math.max(300, Math.min(l.right, Math.round(W * 0.36)));
+  const bottom = Math.max(150, Math.min(l.bottom, H - 260));
+  ui.root.style.setProperty('--bl', left + 'px');
+  ui.root.style.setProperty('--br', right + 'px');
+  ui.root.style.setProperty('--bh', bottom + 'px');
+  for (const k of ['files', 'side', 'bottom']) ui.root.classList.toggle('no-' + k, !paneOpen(k));
+  ui.root.classList.toggle('focus-editor', l.focus === 'editor');
+  ui.root.classList.toggle('focus-wave', l.focus === 'wave');
+  ui.focusBtn.classList.toggle('on', l.focus === 'editor');
+  ui.focusBtn.setAttribute('aria-pressed', String(l.focus === 'editor'));
+  ui.focusBtn.setAttribute('data-tip', l.focus === 'editor' ? 'Bring the panels back' : 'Focus the editor');
+  ui.bFocus.setAttribute('aria-pressed', String(l.focus === 'wave'));
+  ui.bFocus.setAttribute('data-tip', l.focus === 'wave' ? 'Back to the normal layout' : 'Enlarge the analysis area');
+  const bOpen = paneOpen('bottom');
+  ui.bToggle.replaceChildren(icon(bOpen ? 'chev-down' : 'chev-up'));
+  ui.bToggle.setAttribute('aria-label', bOpen ? 'Hide the analysis area' : 'Show the analysis area');
+  ui.bToggle.setAttribute('data-tip', bOpen ? 'Hide the analysis area' : 'Show the analysis area');
+  ui.bToggle.setAttribute('aria-expanded', String(bOpen));
   if (wave) wave.schedule();
+  if (ui.btabs) ui.btabs.refresh();
+  if (ui.stabs) ui.stabs.refresh();
+}
+
+/**
+ * Panels: files, side (inspector), bottom (analysis). A player's explicit choice is kept in the
+ * layout. The analysis area starts folded until there is something to analyse (a build, run or
+ * debug session), unless the player has opened or closed it themselves.
+ */
+function paneOpen(k) {
+  const l = L();
+  if (l.focus === 'editor') return false;
+  if (k === 'files') return l.filesOpen !== false && !(window.innerWidth < 1200 && l.filesOpen !== true);
+  if (k === 'side') return l.sideOpen !== false;
+  if (k === 'bottom') return l.focus === 'wave' || (l.bottomOpen !== undefined ? l.bottomOpen : !!S.analysed);
+  return true;
+}
+function setPane(k, open) {
+  const l = L();
+  if (l.focus === 'editor' && open) l.focus = null;
+  if (k === 'files') l.filesOpen = !!open;
+  if (k === 'side') l.sideOpen = !!open;
+  if (k === 'bottom') { l.bottomOpen = !!open; if (!open && l.focus === 'wave') l.focus = null; }
+  persist();
+  applyLayout();
+}
+/** Something worth showing in the analysis area happened; unfold it unless the player folded it. */
+function analysed() {
+  if (S.analysed) return;
+  S.analysed = true;
+  if (ui) applyLayout();
+}
+function toggleFocus(which) {
+  const l = L();
+  l.focus = l.focus === which ? null : which;
+  if (which === 'wave' && l.focus) selectBottom(L().btab || 'wave');
+  persist();
+  applyLayout();
+  if (l.focus === 'editor') editor.focus();
 }
 
 function selectBottom(k) {
@@ -286,9 +410,12 @@ function selectBottom(k) {
   refreshVisibleBottom();
 }
 
+const SIDE_TITLES = { work: ['work', 'Work order'], board: ['board', 'Board'], debug: ['debug', 'Debugger'], datasheet: ['datasheet', 'Datasheet'] };
 function selectSide(k) {
   L().stab = k;
   ui.stabs.select(k);
+  const t = SIDE_TITLES[k] || SIDE_TITLES.work;
+  put(ui.sideTitle, icon(t[0]), t[1]);
   for (const key in ui.sp) ui.sp[key].hidden = key !== k;
   if (k === 'datasheet') {
     if (!sheet) sheet = new Datasheet(ui.sp.datasheet, DATASHEET);
@@ -306,21 +433,53 @@ function refreshVisibleBottom() {
 
 // ───────────────────────── status ─────────────────────────
 
+const STATUS_ICON = { ok: 'ok', bad: 'fail', warn: 'warn', busy: 'spinner', '': 'info' };
+/** The readout next to the dock: one short line, the whole text in its tooltip. */
 function status(kind, text) {
-  put(ui.status, kind === 'busy' ? h('span', { class: 'spin', 'aria-hidden': 'true' }) : null, h('span', { class: 'st ' + (kind || '') }, text || ''));
+  const k = kind || '';
+  put(ui.status, text ? icon(STATUS_ICON[k] || 'info', { size: 15, class: k === 'busy' ? 'rot' : '' }) : null, h('span', { class: 'st' }, text || ''));
+  ui.status.className = 'bb-status ' + k + (text ? '' : ' empty');
+  if (text) ui.status.setAttribute('data-tip', text); else ui.status.removeAttribute('data-tip');
+  ui.status.setAttribute('data-tip-at', 'below');
+  if (window.SN && text) {
+    window.SN.refreshTip(ui.status);
+    window.SN.motion.animate(ui.status, [{ opacity: 0.4, transform: 'translateY(3px)' }, { opacity: 1, transform: 'none' }], { dur: 200, key: 'st' });
+  }
 }
 
 function setBusy(kind, text) {
   S.busy = kind;
   refreshButtons();
   if (kind) status('busy', text);
-  else if (ui.status.querySelector('.spin')) status('', ''); // nothing reported: don't leave a spinner behind
+  else if (ui.status.classList.contains('busy')) status('', ''); // nothing reported: don't leave a spinner behind
+}
+
+/**
+ * What the dock points at: the running action while one runs, otherwise the next sensible
+ * step for this task (run after a change, submit after a passing run). Never a requirement:
+ * Submit stays available without a passing run, because failed submissions earn hints.
+ */
+function emphasis() {
+  if (S.busy) return { build: ui.build, run: ui.run, submit: ui.submit, debug: ui.debug }[S.busy] || null;
+  if (S.dbg) return null;
+  const r = S.lastRun;
+  if (r && r.result && r.result.pass && r.version === S.version) return ui.submit;
+  return ui.run;
 }
 
 function refreshButtons() {
   const off = !!S.busy || !toolchainOk();
-  for (const b of [ui.build, ui.run, ui.debug, ui.submit]) b.disabled = off;
+  for (const b of [ui.build, ui.run, ui.debug, ui.submit]) {
+    b.disabled = off;
+    b.classList.toggle('busy', S.busy && b === emphasis());
+  }
   ui.seed.disabled = !!S.busy;
+  if (window.SN) {
+    if (!ui.dockInd) ui.dockInd = window.SN.indicator(ui.acts, 'dock-ind');
+    const e = emphasis();
+    for (const b of [ui.build, ui.run, ui.debug, ui.submit]) b.classList.toggle('emph', b === e);
+    requestAnimationFrame(() => ui.dockInd.move(ui.acts.hidden ? null : e));
+  }
 }
 
 function toolchainOk() {
@@ -340,23 +499,34 @@ function storyTask(id) {
   return st && st.tasks ? st.tasks[id] : null;
 }
 
-async function open(id) {
+async function open(id, opts) {
   if (!S.bridge) return;
   if (!ui) buildUi();
   const info = levelInfo(id);
-  if (!info) { toast('There is no bench for task ' + id + '.'); return; }
+  if (!info) { toast('There is no bench for task ' + id + '.', 'alert'); return; }
+  // Where the task's title was on the story side, before the story is covered.
+  const from = opts && opts.from && opts.from.isConnected ? opts.from : null;
+  const fromRect = from ? from.getBoundingClientRect() : null;
   if (S.task && S.task !== id && !(await switchAway())) return false;
   const same = S.task === id;
+  const entering = ui.root.hidden;
   S.task = id;
   S.info = info;
+  if (entering && S.bridge.keepScroll) S.bridge.keepScroll();
   $('#app').classList.add('benching');
   ui.root.hidden = false;
   closeMenu();
   const t = TS();
+  if (!same) S.analysed = false;
   applyLayout();
   S.seed = t.seed || 1;
   S.seeds = Array.from(new Set([1].concat(t.seeds || [], [S.seed])));
   renderHeader();
+  if (entering && window.SN) {
+    // Continuity: the bench rises into place and the task's title flies into its header.
+    window.SN.motion.animate(ui.root, [{ opacity: 0, transform: 'translateY(10px) scale(0.995)' }, { opacity: 1, transform: 'none' }], { dur: 320, ease: window.SN.motion.EASE.soft, key: 'enter' });
+    if (fromRect) window.SN.motion.morph(fromRect, from, ui.name, { dur: 440 });
+  }
   renderSeeds();
   board.set(info);
   ui.banner.hidden = true;
@@ -366,7 +536,9 @@ async function open(id) {
     S.lastSubmit = S.lastSubmit && S.lastSubmit.task === id ? S.lastSubmit : null;
     wave.setTrace(null);
     wave.setEvidence(null);
-    put(ui.bp.results, h('p', { class: 'dim bpad' }, 'Run the firmware (Ctrl+Enter) to check it against the visible seed, or submit it to run every seed.'));
+    put(ui.bp.results, h('div', { class: 'pempty' }, icon('results', { size: 22 }), h('b', null, 'No verdict yet'),
+      h('span', null, 'Run the firmware to check it against one seed, or submit it to run every seed, the hidden ones too.'),
+      h('span', { class: 'row' }, h('span', { class: 'kbd' }, 'Ctrl+Enter'), ' run · ', h('span', { class: 'kbd' }, 'Ctrl+Shift+Enter'), ' submit')));
     renderConsole(ui.bp.console, null);
     S.build = null;
     S.diags = {};
@@ -377,7 +549,7 @@ async function open(id) {
   if (!toolchainOk()) {
     const tc = S.bridge.init().toolchain || {};
     status('bad', 'No C compiler: ' + (tc.error || 'not found'));
-  } else if (!same) status('', 'Ready. Build with Ctrl+B, run with Ctrl+Enter, debug with F5.');
+  } else if (!same) status('', 'Ready. Build Ctrl+B · run Ctrl+Enter · debug F5.');
   try {
     const r = await call('task_prepare', { profile: P(), task: id });
     S.files = r.files;
@@ -422,6 +594,7 @@ async function close() {
   $('#app').classList.remove('benching');
   ui.root.hidden = true;
   S.bridge.refresh();
+  if (window.SN) window.SN.motion.animate($('.main'), [{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }], { dur: 260, key: 'back' });
   return true;
 }
 
@@ -437,8 +610,9 @@ async function reset() {
     for (const timer of S.saveTimers.values()) clearTimeout(timer);
     S.saveTimers.clear();
     Object.assign(S, { task: null, info: null, files: [], diags: {}, build: null,
-      lastRun: null, lastSubmit: null, waveOf: null, version: 0,
+      lastRun: null, lastSubmit: null, waveOf: null, version: 0, analysed: false,
       seeds: [1], seed: 1, traceStale: false, disasmStale: false });
+    S.fileState.clear();
     S.bpTouched.clear();
     return true;
   } finally {
@@ -460,16 +634,18 @@ function renderHeader() {
   const ts = S.bridge.engine().state.tasks[S.task];
   const form = T ? T.form : 'workorder';
   if (ts && ts.status === 'passed') {
-    ui.chip.textContent = form === 'exam' ? 'Handed in' : form === 'lab' ? 'Passed' : 'Satisfactory';
+    put(ui.chip, icon('check', { size: 13 }), form === 'exam' ? 'Handed in' : form === 'lab' ? 'Passed' : 'Satisfactory');
     ui.chip.className = 'bt-chip done';
   } else {
-    ui.chip.textContent = ts && ts.fails ? plural(ts.fails, 'failed submission') : form === 'exam' ? 'Exam' : 'Open';
-    ui.chip.className = 'bt-chip' + (ts && ts.fails ? ' warn' : '');
+    put(ui.chip, ts && ts.fails ? plural(ts.fails, 'failed submission') : form === 'exam' ? 'Exam' : 'Open');
+    ui.chip.className = 'bt-chip' + (ts && ts.fails ? ' warn' : ' live');
   }
+  ui.name.setAttribute('data-task-title', S.task);
   const extras = S.info.extra ? S.bridge.extras(S.task) : [];
   ui.own.hidden = !extras.length;
   if (extras.length) {
-    ui.own.title = 'Run and debug with the stimulus of your own check: ' + extras.map(x => fill(x.text)).join(' ') + ' Submitting always includes it.';
+    ui.own.setAttribute('data-tip', 'Run and debug with the stimulus of your own check. Submitting always includes it; it only adds.');
+    ui.own.setAttribute('data-tip-at', 'below');
     ui.ownBox.checked = TS().own !== false;
   }
 }
@@ -478,7 +654,7 @@ function renderSeeds() {
   const failed = new Set();
   if (S.lastSubmit && S.lastSubmit.task === S.task) for (const s of S.lastSubmit.base) if (!s.pass) failed.add(s.seed);
   put(ui.seed, S.seeds.map(s => h('option', { value: String(s), selected: s === S.seed },
-    'Seed ' + s + (s === 1 ? ' · visible' : ' · hidden') + (failed.has(s) ? ' ✗' : ''))));
+    'Seed ' + s + (s === 1 ? ' · visible' : ' · hidden') + (failed.has(s) ? ' · failed' : ''))));
   ui.seed.value = String(S.seed);
 }
 
@@ -503,24 +679,40 @@ function inWorkspace(p) {
   return !!p && /^(tasks|lib|sdk)\//.test(p);
 }
 
+const FILE_ICON = { c: 'file', h: 'file', s: 'chip', ld: 'output', txt: 'doc' };
+function fileStateIcon(p) {
+  const st = S.fileState.get(p);
+  if (st === 'failed') return h('span', { class: 'fstate bad', 'data-tip': 'Not saved: the last write failed. Your text is kept; it retries on the next edit or Ctrl+S.' }, icon('alert', { size: 13 }));
+  if (st === 'saving') return h('span', { class: 'fstate busy', 'data-tip': 'Saving…' }, icon('spinner', { size: 13, class: 'rot' }));
+  if (editor.isDirty(p)) return h('span', { class: 'fstate dirty', 'data-tip': 'Changed; saves in a moment' }, h('i'));
+  return null;
+}
+
 function renderFiles() {
   if (!S.task) return;
   const errCount = p => (S.diags[p] || []).filter(d => d.severity === 'error').length;
   const warnCount = p => (S.diags[p] || []).filter(d => d.severity === 'warning').length;
-  const group = (kind, title, note, canAdd) => {
+  const group = (kind, title, note, canAdd, iconName) => {
     const list = S.files.filter(f => f.kind === kind);
-    const head = h('div', { class: 'fg-h' }, h('span', null, title),
-      canAdd ? h('button', { type: 'button', class: 'fg-add', title: 'New file' }, '+') : null);
-    if (canAdd) head.querySelector('.fg-add').addEventListener('click', () => newFile(kind === 'task' ? 'tasks/' + S.task + '/' : 'lib/'));
-    const ul = h('ul', { class: 'fl' + (note ? ' muted' : '') }, list.map(f => {
+    const prefix = kind === 'task' ? 'tasks/' + S.task + '/' : 'lib/';
+    const head = h('div', { class: 'fg-h' }, h('span', { class: 'fg-t' }, icon(iconName, { size: 13 }), title),
+      canAdd ? ibtn('file-new', 'New file in ' + prefix, () => newFile(prefix), { cls: 'sm' }) : null,
+      kind === 'sdk' ? h('span', { class: 'ro-tag', 'data-tip': 'The SDK is read-only' }, icon('lock', { size: 12 })) : null);
+    const ul = h('ul', { class: 'fl' + (note ? ' muted' : ''), role: 'list' }, list.map(f => {
       const e = errCount(f.path), w = warnCount(f.path);
-      const li = h('li', { class: (editor.current() === f.path ? 'on' : '') + (S.open.includes(f.path) ? ' open' : ''), tabindex: '0', title: f.path },
-        h('span', { class: 'fi ' + ext(f.name) }),
+      const x = (/\.([A-Za-z]+)$/.exec(f.name) || [, ''])[1].toLowerCase();
+      const li = h('li', { class: (editor.current() === f.path ? 'on' : '') + (S.open.includes(f.path) ? ' open' : ''), tabindex: '0', 'data-tip': f.path + (f.readonly ? ' · read-only' : '') + ' · right-click for more', 'aria-current': editor.current() === f.path ? 'true' : null },
+        icon(FILE_ICON[x] || 'file', { size: 14, class: 'fi ' + ext(f.name) }),
         h('span', { class: 'fn' }, f.name),
-        e ? h('span', { class: 'badge err' }, String(e)) : w ? h('span', { class: 'badge warn' }, String(w)) : null,
-        editor.isDirty(f.path) ? h('span', { class: 'mod', title: 'Saving…' }, '●') : null);
+        e ? h('span', { class: 'badge err', 'aria-label': plural(e, 'error') }, String(e)) : w ? h('span', { class: 'badge warn', 'aria-label': plural(w, 'warning') }, String(w)) : null,
+        fileStateIcon(f.path));
       li.addEventListener('click', () => openFile(f.path, true));
-      li.addEventListener('keydown', ev => { if (ev.key === 'Enter') openFile(f.path, true); });
+      li.addEventListener('keydown', ev => {
+        if (ev.key === 'Enter') openFile(f.path, true);
+        if (ev.key === 'ContextMenu' || (ev.shiftKey && ev.key === 'F10')) { ev.preventDefault(); const r = li.getBoundingClientRect(); fileMenu(f, r.left + 20, r.bottom); }
+        if (ev.key === 'F2' && !f.readonly) renameFile(f);
+        if (ev.key === 'Delete' && !f.readonly) deleteFile(f);
+      });
       li.addEventListener('contextmenu', ev => {
         ev.preventDefault();
         fileMenu(f, ev.clientX, ev.clientY);
@@ -531,10 +723,10 @@ function renderFiles() {
       !list.length && kind === 'lib' ? h('p', { class: 'fg-note' }, 'Drivers you write once and reuse. Every .c here is linked into every task except the exam.') : null);
   };
   put(ui.files,
-    group('task', 'Task ' + S.task, null, true),
-    group('lib', 'Library', S.info.library ? null : 'Not linked into this task: exam rules.', true),
-    group('sdk', 'SDK', null, false),
-    h('div', { class: 'fg-foot' }, btn('Open the folder', 'link', () => call('reveal', { profile: P(), path: 'tasks/' + S.task + '/main.c' }).catch(err => toast(errText(err))))));
+    group('task', 'Task ' + S.task, null, true, 'work'),
+    group('lib', 'Library', S.info.library ? null : 'Not linked into this task: exam rules.', true, 'library'),
+    group('sdk', 'SDK', null, false, 'chip'),
+    h('div', { class: 'fg-foot' }, btn('Open the folder', 'quiet small', () => call('reveal', { profile: P(), path: 'tasks/' + S.task + '/main.c' }).catch(err => toast(errText(err), 'alert')), null, 'folder-open')));
 }
 
 function ext(name) {
@@ -543,12 +735,12 @@ function ext(name) {
 }
 
 function fileMenu(f, x, y) {
-  const items = [['Open', () => openFile(f.path, true)]];
+  const items = [['Open', () => openFile(f.path, true), false, 'file']];
   if (!f.readonly) {
-    items.push(['Rename…', () => renameFile(f)]);
-    items.push(['Delete…', () => deleteFile(f), true]);
+    items.push(['Rename…', () => renameFile(f), false, 'rename']);
+    items.push(['Delete…', () => deleteFile(f), true, 'delete']);
   }
-  items.push(['Show in folder', () => call('reveal', { profile: P(), path: f.path }).catch(err => toast(errText(err)))]);
+  items.push(['Show in folder', () => call('reveal', { profile: P(), path: f.path }).catch(err => toast(errText(err), 'alert')), false, 'folder-open']);
   menu(x, y, items);
 }
 
@@ -556,53 +748,84 @@ async function refreshFiles() {
   try {
     const r = await call('ws_list', { profile: P(), task: S.task });
     S.files = r.files;
-  } catch (err) { toast(errText(err)); }
+  } catch (err) { toast(errText(err), 'alert'); }
   renderFiles();
 }
 
+/* File operations ask in the game's own dialogs. A refusal from the backend (a taken name, a
+   bad extension, a disk error) is shown in the dialog, which stays open for another try. */
 async function newFile(prefix) {
-  const name = window.prompt('New file in ' + prefix + ' — a name ending in .c or .h:', prefix.startsWith('lib') ? 'gpio.c' : 'util.c');
-  if (!name) return;
-  const n = name.trim();
-  try {
-    await call('ws_create', { profile: P(), path: prefix + n });
-  } catch (err) { toast(errText(err)); return; }
+  const profile = P(), task = S.task;
+  const made = await window.SN.dialog.prompt({
+    title: 'New file', icon: 'file-new', ok: 'Create', label: 'Name, in ' + prefix,
+    input: { value: prefix.startsWith('lib') ? 'gpio.c' : 'util.c', mono: true, hint: 'Ends in .c, .h, .S or .txt.' },
+    validate: v => !v ? 'Give the file a name.' : /[\\/]/.test(v) ? 'Just a name, without folders.' : null,
+    onSubmit: async n => {
+      if (P() !== profile || S.task !== task) throw new Error('The workbench changed task meanwhile.');
+      await call('ws_create', { profile, path: prefix + n });
+    },
+  });
+  if (made === null || P() !== profile || S.task !== task) return;
   await refreshFiles();
-  await openFile(prefix + n, true);
+  await openFile(prefix + made, true);
 }
 
 async function renameFile(f) {
   const dir = f.path.slice(0, f.path.length - f.name.length);
-  const name = window.prompt('Rename ' + f.name + ' to:', f.name);
-  if (!name || name.trim() === f.name) return;
-  const to = dir + name.trim();
-  if (!(await saveFile(f.path))) return;
-  try {
-    await call('ws_rename', { profile: P(), from: f.path, to });
-  } catch (err) { toast(errText(err)); return; }
+  const profile = P();
+  let to = null;
+  const name = await window.SN.dialog.prompt({
+    title: 'Rename ' + f.name, icon: 'rename', ok: 'Rename', label: 'New name', input: { value: f.name, mono: true },
+    validate: v => !v ? 'Give the file a name.' : /[\\/]/.test(v) ? 'Just a name, without folders.' : null,
+    onSubmit: async n => {
+      if (n === f.name) return;
+      if (P() !== profile) throw new Error('The profile changed meanwhile.');
+      if (!(await saveFile(f.path))) throw new Error('Could not save ' + f.name + ' first; nothing was renamed.');
+      await call('ws_rename', { profile, from: f.path, to: dir + n });
+      to = dir + n;
+    },
+  });
+  if (name === null || !to || P() !== profile) return;
   const wasOpen = S.open.includes(f.path);
   const bps = bench().bps[f.path];
   delete bench().bps[f.path];
   if (bps) bench().bps[to] = bps;
   if (wasOpen) await closeFile(f.path, true);
+  S.fileState.delete(f.path);
   await refreshFiles();
   if (wasOpen) await openFile(to, true);
   persist();
 }
 
 async function deleteFile(f) {
-  if (!window.confirm('Delete ' + f.path + '? This cannot be undone.')) return;
-  const t = S.saveTimers.get(f.path);
-  if (t) { clearTimeout(t); S.saveTimers.delete(f.path); }
-  // Let an already-dispatched autosave finish before deleting the file.
-  if (S.saving.has(f.path)) await S.saving.get(f.path);
+  const ok = await window.SN.dialog.confirm({
+    title: 'Delete ' + f.name + '?', icon: 'delete', danger: true, ok: 'Delete', cancel: 'Keep it',
+    body: f.path + ' is removed from your workspace folder. This cannot be undone.',
+  });
+  if (!ok) return;
+  await removeFile(f);
+}
+
+/** Delete without asking. No autosave of this file, queued or in flight, may land after the delete. */
+async function removeFile(f) {
+  S.deleting.add(f.path);
   try {
-    await call('ws_delete', { profile: P(), path: f.path });
-  } catch (err) { toast(errText(err)); return; }
-  delete bench().bps[f.path];
-  if (S.open.includes(f.path)) await closeFile(f.path, true);
-  persist();
-  await refreshFiles();
+    const t = S.saveTimers.get(f.path);
+    if (t) { clearTimeout(t); S.saveTimers.delete(f.path); }
+    // A write in flight may be followed by a newer one; wait until the whole chain is done.
+    while (S.saving.has(f.path)) await S.saving.get(f.path);
+    try {
+      await call('ws_delete', { profile: P(), path: f.path });
+    } catch (err) { toast(errText(err), 'alert'); return false; }
+    delete bench().bps[f.path];
+    S.fileState.delete(f.path);
+    if (S.open.includes(f.path)) await closeFile(f.path, true);
+    persist();
+    await refreshFiles();
+    return true;
+  } finally {
+    S.deleting.delete(f.path);
+  }
 }
 
 async function openFile(path, show) {
@@ -654,20 +877,36 @@ async function closeFile(path, noSave) {
 function renderTabs() {
   put(ui.edtabs, S.open.map(p => {
     const f = S.files.find(x => x.path === p);
+    const st = S.fileState.get(p);
     const dirty = editor.isDirty(p);
-    const el = h('div', { class: 'etab' + (p === editor.current() ? ' on' : ''), role: 'tab', title: p, 'aria-selected': String(p === editor.current()) },
+    const errs = (S.diags[p] || []).filter(d => d.severity === 'error').length;
+    const on = p === editor.current();
+    const stateLabel = st === 'failed' ? 'not saved' : st === 'saving' ? 'saving' : dirty ? 'changed' : '';
+    const el = h('div', { class: 'etab' + (on ? ' on' : '') + (st === 'failed' ? ' bad' : ''), role: 'tab', tabindex: on ? '0' : '-1', 'data-tip': p + (stateLabel ? ' · ' + stateLabel : ''), 'data-tip-at': 'below', 'aria-selected': String(on) },
+      icon('file', { size: 13, class: 'fi ' + ext(p) }),
       h('span', { class: 'nm' }, basename(p)),
-      f && f.readonly ? h('span', { class: 'ro' }, 'read-only') : null,
-      (S.diags[p] || []).some(d => d.severity === 'error') ? h('span', { class: 'errdot', title: 'Build errors' }) : null,
-      h('button', { type: 'button', class: 'x', title: dirty ? 'Saving…' : 'Close' }, dirty ? '●' : '×'));
+      f && f.readonly ? h('span', { class: 'ro', 'aria-label': 'read-only' }, icon('lock', { size: 11 })) : null,
+      errs ? h('span', { class: 'errdot', 'aria-label': plural(errs, 'build error') }) : null,
+      fileStateIcon(p),
+      h('button', { type: 'button', class: 'x', 'aria-label': 'Close ' + basename(p), tabindex: '-1' }, icon('close', { size: 13 })));
     el.addEventListener('mousedown', ev => { if (ev.button === 1) { ev.preventDefault(); closeFile(p); } });
     el.addEventListener('click', ev => {
-      if (ev.target.classList.contains('x')) closeFile(p);
+      if (ev.target.closest('.x')) closeFile(p);
       else { editor.show(p); TS().active = p; persist(); renderTabs(); renderFiles(); }
+    });
+    el.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter') editor.focus();
+      if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+        const i = S.open.indexOf(p) + (ev.key === 'ArrowRight' ? 1 : -1);
+        const q = S.open[(i + S.open.length) % S.open.length];
+        editor.show(q); TS().active = q; renderTabs(); renderFiles();
+        const t = ui.edtabs.querySelector('.etab.on');
+        if (t) t.focus();
+      }
     });
     return el;
   }));
-  if (!S.open.length) ui.edtabs.append(h('span', { class: 'etab-empty' }, 'Open a file on the left.'));
+  if (!S.open.length) ui.edtabs.append(h('span', { class: 'etab-empty' }, 'Open a file from the list on the left.'));
 }
 
 // ───────────────────────── saving ─────────────────────────
@@ -678,12 +917,16 @@ function onEdit(path) {
   const t = S.saveTimers.get(path);
   if (t) clearTimeout(t);
   S.saveTimers.set(path, setTimeout(() => saveFile(path), 600));
-  const tab = ui.edtabs.querySelector('.etab.on .x');
-  if (tab && tab.textContent !== '●') { tab.textContent = '●'; tab.title = 'Saving…'; }
+  // Mark the tab changed at once without rebuilding the strip on every keystroke.
+  const tab = ui.edtabs.querySelector('.etab.on');
+  if (tab && !tab.querySelector('.fstate') && !S.fileState.has(path)) {
+    tab.insertBefore(h('span', { class: 'fstate dirty', 'data-tip': 'Changed; saves in a moment' }, h('i')), tab.querySelector('.x'));
+  }
   if (S.dbg && !S.dbg.staleShown) {
     S.dbg.staleShown = true;
-    status('warn', 'The code changed: the debugger is still running the old build. ↺ rebuilds and restarts.');
+    status('warn', 'The code changed: the debugger still runs the old build. Restart rebuilds it.');
   }
+  refreshButtons();
 }
 
 async function saveFile(path) {
@@ -696,17 +939,21 @@ async function saveFile(path) {
     if (!(await pending)) return false;
     return saveFile(path);
   }
+  if (S.deleting.has(path)) return true; // the file is going away; never write it back
   if (!editor.has(path) || !editor.isDirty(path)) return true;
   const text = editor.text(path);
   if (text === null) return true;
   const profile = P();
+  S.fileState.set(path, 'saving');
   const write = (async () => {
     try {
       await call('ws_write', { profile, path, text });
       if (P() === profile && editor.text(path) === text) editor.markSaved(path);
+      if (P() === profile) S.fileState.delete(path);
       return true;
     } catch (err) {
-      status('bad', 'Could not save ' + basename(path) + ': ' + errText(err));
+      if (P() === profile) S.fileState.set(path, 'failed');
+      status('bad', 'Could not save ' + basename(path) + ': ' + errText(err) + '. Your text is kept.');
       return false;
     }
   })();
@@ -766,6 +1013,7 @@ function showBuild(b) {
   S.diags = by;
   for (const p of S.open) editor.setDiagnostics(p, by[p] || []);
   if (b.sizes) board.setSizes(b.sizes);
+  analysed();
   renderOutput();
   renderFiles();
   renderTabs();
@@ -776,6 +1024,7 @@ function failBuild() {
   const errs = b ? b.diags.filter(d => d.severity === 'error') : [];
   status('bad', 'Build failed' + (errs.length ? ': ' + plural(errs.length, 'error') : '') + '.');
   selectBottom('output');
+  ui.btabs.dot('output', L().btab !== 'output');
   const first = errs.find(d => inWorkspace(d.file));
   if (first) gotoLine(first.file, first.line);
 }
@@ -787,7 +1036,8 @@ function renderOutput() {
     tc.ok ? 'Compiler: ' + tc.name + ' · ' + (i.cflags || []).join(' ') : 'No compiler found: ' + (tc.error || '') + ' The game looks for the zig it ships with, then K28_ZIG, then zig or clang on PATH.');
   const b = S.build;
   if (!b) {
-    put(ui.bp.output, h('p', { class: 'dim bpad' }, 'Build output shows up here. Every build compiles your task and library at -O0 with full debug info.'), tcLine);
+    put(ui.bp.output, h('div', { class: 'pempty' }, icon('build', { size: 22 }), h('b', null, 'Nothing built yet'),
+      h('span', null, 'Every build compiles your task and library at -O0 with full debug info.'), h('span', { class: 'row' }, h('span', { class: 'kbd' }, 'Ctrl+B'), ' build')), tcLine);
     return;
   }
   const errs = b.diags.filter(d => d.severity === 'error').length;
@@ -795,12 +1045,13 @@ function renderOutput() {
   const kb = n => (n >= 1024 ? (n / 1024).toFixed(1) + ' KB' : n + ' B');
   put(ui.bp.output,
     h('div', { class: 'out-head ' + (b.ok ? 'ok' : 'bad') },
+      icon(b.ok ? 'ok' : 'fail', { size: 16 }),
       h('b', null, b.ok ? 'Build succeeded' : 'Build failed'),
       ' · ' + plural(errs, 'error') + ', ' + plural(warns, 'warning') + ' · ' + b.ms + ' ms',
       b.sizes ? ' · flash ' + kb(b.sizes.flash) + ', RAM ' + kb(b.sizes.ram) : ''),
     b.diags.length ? h('ul', { class: 'diags' }, b.diags.map(d => {
-      const li = h('li', { class: d.severity, tabindex: '0' },
-        h('span', { class: 'sev' }, d.severity),
+      const li = h('li', { class: d.severity, tabindex: '0', 'data-tip': inWorkspace(d.file) && d.line ? 'Go to the line' : null },
+        h('span', { class: 'sev' }, icon(d.severity === 'error' ? 'fail' : d.severity === 'warning' ? 'warn' : 'info', { size: 13 }), d.severity),
         h('span', { class: 'dloc' }, d.file ? basename(d.file) + (d.line ? ':' + d.line + (d.col ? ':' + d.col : '') : '') : 'linker'),
         h('span', { class: 'msg' }, d.message));
       const go = () => { if (inWorkspace(d.file) && d.line) gotoLine(d.file, d.line); };
@@ -889,6 +1140,7 @@ async function doRun(opts) {
 
 function applyRun(res, o) {
   S.lastRun = res;
+  analysed();
   const sr = res.result;
   wave.setTrace(res.trace, { order: S.info.pins.map(p => p.pin) });
   wave.setNow(S.dbg ? S.dbg.state.now : null);
@@ -928,17 +1180,26 @@ const conCtx = {
   },
 };
 
+/** Results → waveform: the button's ghost travels to the Waveform tab as the analyser takes over. */
+function evidenceHop(src) {
+  if (!src || !window.SN || !src.isConnected) return;
+  window.SN.motion.morph(src.getBoundingClientRect(), src, ui.btabs.btns.wave, { dur: 380 });
+}
+
 const resCtx = {
-  async showEvidence(sr, rule, extra) {
+  async showEvidence(sr, rule, extra, src) {
     // The trace on screen only fits this evidence if it came from the same seed and the same code.
     const sameCode = S.lastSubmit && S.lastSubmit.version === S.waveOf?.version;
     const same = S.waveOf && !S.waveOf.live && S.waveOf.seed === sr.seed && S.waveOf.extra === !!extra && (sameCode || S.lastRun?.result === sr);
     if (same) {
+      evidenceHop(src);
       wave.setEvidence(rule.evidence);
       selectBottom('wave');
       return;
     }
-    await doRun({ seed: sr.seed, extra: !!extra, keep: true, evidence: rule.id });
+    const rect = src && src.isConnected ? src.getBoundingClientRect() : null;
+    const ok = await doRun({ seed: sr.seed, extra: !!extra, keep: true, evidence: rule.id });
+    if (ok && rect && window.SN && src) window.SN.motion.morph(rect, src, ui.btabs.btns.wave, { dur: 380 });
   },
   async replay(seed, extra) {
     if (!S.seeds.includes(seed)) S.seeds.push(seed);
@@ -973,6 +1234,18 @@ async function doSubmit() {
   }
 }
 
+function showBanner(kind) {
+  ui.banner.className = 'bbanner ' + kind;
+  ui.banner.hidden = false;
+  if (window.SN) window.SN.motion.animate(ui.banner, [{ opacity: 0, transform: 'translateY(-8px) scale(0.98)' }, { opacity: 1, transform: 'none' }], { dur: 360, ease: window.SN.motion.EASE.spring, key: 'banner' });
+  const b = ui.banner.querySelector('.btn.primary');
+  if (b) b.focus({ preventScroll: true });
+}
+function hideBanner() {
+  ui.banner.hidden = true;
+  editor.focus();
+}
+
 function applySubmit(res) {
   const id = res.task;
   const eng = S.bridge.engine();
@@ -1001,12 +1274,12 @@ function applySubmit(res) {
     if (before && before.status === 'active') {
       const word = T && T.form === 'exam' ? 'Handed in.' : T && T.form === 'lab' ? 'Passed.' : 'Satisfactory.';
       put(ui.banner,
+        h('span', { class: 'b-ico' }, icon('ok', { size: 20 })),
         h('span', { class: 'b-big' }, word),
-        h('span', null, ' Every seed passes. The story goes on without you until you go back to it.'),
-        btn('Back to the story', 'primary small', () => close()),
-        btn('Stay here', 'ghost small', () => { ui.banner.hidden = true; }));
-      ui.banner.className = 'bbanner pass';
-      ui.banner.hidden = false;
+        h('span', { class: 'b-txt' }, 'Every seed passes. The story goes on without you until you go back to it.'),
+        btn('Back to the story', 'primary small', () => close(), null, 'back'),
+        btn('Stay here', 'quiet small', () => hideBanner()));
+      showBanner('pass');
     }
   } else {
     S.bridge.failed(id);
@@ -1017,11 +1290,11 @@ function applySubmit(res) {
     if (before && after && after.hints > before.hints) {
       const hint = T && T.hints[after.hints - 1];
       put(ui.banner,
-        h('span', null, (hint && hint.who ? hint.who : 'Someone') + ' has looked over your shoulder. It’s on the work order.'),
-        btn('Read it', 'primary small', () => { selectSide('work'); ui.banner.hidden = true; }),
-        btn('Later', 'ghost small', () => { ui.banner.hidden = true; }));
-      ui.banner.className = 'bbanner hint';
-      ui.banner.hidden = false;
+        h('span', { class: 'b-ico' }, icon('hint', { size: 18 })),
+        h('span', { class: 'b-txt' }, (hint && hint.who ? hint.who : 'Someone') + ' has looked over your shoulder. It’s on the work order.'),
+        btn('Read it', 'primary small', () => { selectSide('work'); setPane('side', true); hideBanner(); }, null, 'work'),
+        btn('Later', 'quiet small', () => hideBanner()));
+      showBanner('hint');
       ui.stabs.dot('work', true);
     }
   }
@@ -1101,6 +1374,9 @@ async function doDebug() {
     if (!r.ok) { failBuild(); return; }
     S.dbg = { state: r.state, running: false, version, seed: S.seed, extra, busy: false };
     S.bpTouched.clear();
+    // Evidence and cursors belong to the run they came from; the live session draws its own trace.
+    wave.setEvidence(null);
+    if (wave.clearCursors) wave.clearCursors();
     enterDebugUi();
     await dbgPanel.armWatches();
     await onStop(r.state);
@@ -1112,18 +1388,32 @@ async function doDebug() {
   }
 }
 
+function swapDock(show, hide) {
+  const from = ui.dock.getBoundingClientRect();
+  hide.hidden = true;
+  show.hidden = false;
+  if (window.SN) {
+    // The dock changes its instrument set in place: it springs to its new width.
+    const to = ui.dock.getBoundingClientRect();
+    window.SN.motion.animate(ui.dock, [{ width: from.width + 'px' }, { width: to.width + 'px' }], { dur: 320, ease: window.SN.motion.EASE.spring, key: 'w' });
+    window.SN.motion.animate(show, [{ opacity: 0, transform: 'scale(0.96)' }, { opacity: 1, transform: 'none' }], { dur: 240, ease: window.SN.motion.EASE.out, key: 'in' });
+  }
+}
+
 function enterDebugUi() {
   ui.root.classList.add('debugging');
-  ui.acts.hidden = true;
-  ui.dbgBar.hidden = false;
+  swapDock(ui.dbgBar, ui.acts);
   selectSide('debug');
+  setPane('side', true);
+  analysed();
   updateDbgUi();
+  refreshButtons();
 }
 
 function exitDebugUi() {
   ui.root.classList.remove('debugging');
-  ui.acts.hidden = false;
-  ui.dbgBar.hidden = true;
+  swapDock(ui.acts, ui.dbgBar);
+  refreshButtons();
 }
 
 function updateDbgUi() {
@@ -1133,14 +1423,23 @@ function updateDbgUi() {
   const over = st && (st.cpu === 'faulted' || st.stop.reason === 'end');
   for (const b of [ui.dCont, ui.dOver, ui.dInto, ui.dOut]) b.disabled = run || over;
   ui.dBack.disabled = run || !(st && st.can_step_back);
+  // Continue and Pause share one place: the one that applies now is shown.
+  ui.dCont.hidden = run;
+  ui.dPause.hidden = !run;
   ui.dPause.disabled = !run;
   ui.dRestart.disabled = run;
   ui.dTime.textContent = st ? 't = ' + fmtT(run ? S.dbg.now || st.now : st.now, 4) : '';
+  ui.dbgBar.dataset.state = run ? 'running' : over ? (st.cpu === 'faulted' ? 'faulted' : 'ended') : 'stopped';
+  const why = over ? (st.cpu === 'faulted' ? ' (the core faulted)' : ' (the run is over: restart or step back)') : run ? ' (running: pause first)' : '';
+  for (const [b, label] of [[ui.dCont, 'Continue'], [ui.dOver, 'Step over'], [ui.dInto, 'Step into'], [ui.dOut, 'Step out']]) b.setAttribute('data-tip', label + (b.disabled ? why : ''));
+  ui.dBack.setAttribute('data-tip', 'Step back one line (time runs backwards)' + (ui.dBack.disabled ? (run ? ' (running: pause first)' : ' (nothing earlier to return to)') : ''));
 }
 
 async function dbgCmd(cmd, args) {
   if (!S.dbg || S.dbg.running || S.dbg.busy) return;
   S.dbg.busy = true;
+  S.dbg.lastCmd = cmd;
+  S.dbg.before = S.dbg.state ? S.dbg.state.now : null;
   try {
     await call('dbg_cmd', Object.assign({ cmd }, args || {}));
   } catch (err) {
@@ -1241,6 +1540,10 @@ const REASON_LINE = {
 
 async function onStop(st) {
   if (!S.dbg || !st) return;
+  const before = S.dbg.before;
+  // Time went backwards when the backend says so: a reverse step, or travel to an earlier time.
+  const back = before !== null && before !== undefined && st.now < before;
+  S.dbg.before = null;
   S.dbg.state = st;
   S.dbg.now = st.now;
   updateDbgUi();
@@ -1248,11 +1551,17 @@ async function onStop(st) {
     await openFile(st.file, true);
     editor.setPc(st.file, st.line);
     editor.gotoLine(st.file, st.line, false);
+    if (back) editor.flashPc('back');
   } else {
     editor.setPc(null);
   }
   board.setLevels(st.pins);
-  wave.setNow(st.now);
+  wave.setNow(st.now, back ? { from: before } : null);
+  if (back && window.SN) {
+    ui.dTime.classList.remove('rev');
+    void ui.dTime.offsetWidth;
+    ui.dTime.classList.add('rev');
+  }
   S.traceStale = true;
   S.disasmStale = true;
   if (!(st.file && inWorkspace(st.file)) && L().btab !== 'disasm') selectBottom('disasm');
@@ -1338,7 +1647,8 @@ function onKey(ev) {
   const mod = ev.ctrlKey || ev.metaKey;
   // A desktop app must not reload itself on the browser's shortcuts.
   const reload = k === 'F5' || (mod && (k === 'r' || k === 'R')) || k === 'BrowserRefresh';
-  if (!isOpen()) {
+  // Nothing behind an overlay (a dialog, the menu sheet) may run, build or step.
+  if (!isOpen() || (window.SN && window.SN.modalOpen())) {
     if (reload && window.K28 && window.K28.desktop) ev.preventDefault();
     return;
   }
@@ -1356,6 +1666,8 @@ function onKey(ev) {
   else if (mod && k === 'Enter' && ev.shiftKey) doSubmit();
   else if (mod && k === 'Enter') doRun();
   else if (mod && (k === 's' || k === 'S')) saveAll();
+  else if (mod && (k === 'j' || k === 'J') && !ev.shiftKey) setPane('bottom', !paneOpen('bottom'));
+  else if (mod && ev.shiftKey && (k === 'e' || k === 'E')) toggleFocus('editor');
   else if (reload) { /* swallowed */ }
   else if (k === 'Escape' && menuEl) closeMenu();
   else handled = false;
@@ -1383,10 +1695,10 @@ window.Bench = {
     window.addEventListener('beforeunload', () => { if (editor) saveAll(); });
     window.K28.beforeQuit(() => (editor ? saveAll() : null));
   },
-  open(id) {
+  open(id, opts) {
     if (S.resetting) return Promise.resolve(false);
     S.opening++;
-    return open(id).catch(err => { toast(errText(err)); return false; })
+    return open(id, opts).catch(err => { toast(errText(err), 'alert'); return false; })
       .finally(() => { S.opening--; });
   },
   close() {
@@ -1394,4 +1706,14 @@ window.Bench = {
   },
   reset,
   isOpen,
+  /** The theme or text size changed: the editor and canvases follow without being rebuilt. */
+  setAppearance() {
+    if (!editor) return;
+    editor.setDark();
+    if (wave) wave.schedule();
+  },
 };
+if (window.matchMedia) {
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', () => window.Bench.setAppearance());
+}

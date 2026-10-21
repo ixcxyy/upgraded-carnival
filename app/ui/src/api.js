@@ -49,7 +49,10 @@
         await w.destroy();
       } catch (err) {
         closing = false;
-        window.alert(String(err.message || err));
+        const msg = String(err.message || err);
+        // The in-app dialog when the page has it; a plain alert otherwise.
+        if (window.SN && window.SN.dialog) window.SN.dialog.alert({ title: 'Not everything is saved', icon: 'alert', body: msg, ok: 'Back to the game' });
+        else window.alert(msg);
       }
     });
   }

@@ -34,6 +34,7 @@ function place(el, animateMove) {
   kbd.textContent = k || '';
   kbd.hidden = !k;
   tip.style.width = '';
+  tip.classList.add('on'); // measurable (display) before the first showing
   const w = tip.offsetWidth, hgt = tip.offsetHeight;
   const below = el.getAttribute('data-tip-at') === 'below' || r.top < hgt + 14;
   let left = r.left + r.width / 2 - w / 2;

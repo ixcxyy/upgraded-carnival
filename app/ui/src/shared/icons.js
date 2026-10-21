@@ -13,7 +13,7 @@ import {
   ArrowLeft, X, Check, CircleAlert, LoaderCircle, ChevronRight, ChevronDown, ChevronLeft, ChevronUp,
   ClipboardList, Power, FileText, MapPin, Users, Eye, Library, ArrowLeftToLine, ArrowRightToLine,
   History, Info, CircleCheck, CircleX, TriangleAlert, Keyboard, FastForward, NotebookPen, Plus,
-  Lock, CornerDownLeft, Cpu, Flag, Sparkles, Undo2, Save, Dot, MessageSquare, Hand, Layers,
+  Lock, CornerDownLeft, Cpu, Flag, Sparkles, Undo2, Save, Dot, MessageSquare, Hand, Layers, Variable,
 } from 'lucide';
 
 const SQUARE_WAVE = [['path', { d: 'M2 17h4V7h5v10h5V7h4v10h2' }]];
@@ -38,7 +38,7 @@ const NODES = {
   'edge-prev': ArrowLeftToLine, 'edge-next': ArrowRightToLine, travel: History, info: Info,
   ok: CircleCheck, fail: CircleX, warn: TriangleAlert, keys: Keyboard, skip: FastForward, note: NotebookPen,
   plus: Plus, lock: Lock, flag: Flag, hint: Sparkles, undo: Undo2, save: Save, dot: Dot, message: MessageSquare,
-  letgo: Hand, output: Layers, mark: MARK,
+  letgo: Hand, output: Layers, vars: Variable, mark: MARK,
 };
 
 const NS = 'http://www.w3.org/2000/svg';

@@ -1,7 +1,7 @@
 // The K28 datasheet, inside the workbench: a table of contents and a search that marks every
 // hit and steps through them.
 
-import { h, btn, put } from './util.js';
+import { h, btn, ibtn, icon, put } from './util.js';
 
 function slug(s) {
   return 'ds-' + s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -17,10 +17,10 @@ export class Datasheet {
     this.toc = h('nav', { class: 'ds-toc', 'aria-label': 'Datasheet contents' });
     this.doc = h('div', { class: 'ds-doc' });
     this.el = h('div', { class: 'ds' },
-      h('div', { class: 'ds-bar' }, this.q, this.count,
-        btn('◂', 'ghost small icon', () => this.step(-1), { title: 'Previous hit (Shift+Enter)' }),
-        btn('▸', 'ghost small icon', () => this.step(1), { title: 'Next hit (Enter)' }),
-        btn('Contents', 'ghost small', () => { this.toc.hidden = !this.toc.hidden; })),
+      h('div', { class: 'ds-bar' }, h('label', { class: 'ds-search' }, icon('search', { size: 15 }), this.q), this.count,
+        ibtn('chev-up', 'Previous hit', () => this.step(-1), { cls: 'sm', kbd: 'Shift+Enter', at: 'below' }),
+        ibtn('chev-down', 'Next hit', () => this.step(1), { cls: 'sm', kbd: 'Enter', at: 'below' }),
+        this.tocBtn = ibtn('output', 'Contents', () => { this.toc.hidden = !this.toc.hidden; this.tocBtn.setAttribute('aria-pressed', String(!this.toc.hidden)); }, { cls: 'sm', at: 'below' })),
       h('div', { class: 'ds-body' }, this.toc, this.doc));
     host.append(this.el);
     this.loaded = false;

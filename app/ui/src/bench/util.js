@@ -37,8 +37,22 @@ export function put(el, ...kids) {
 export const $ = (sel, root) => (root || document).querySelector(sel);
 export const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 
-export function btn(label, cls, onclick, extra) {
-  return h('button', Object.assign({ type: 'button', class: 'btn ' + (cls || ''), onclick }, extra || {}), label);
+export function btn(label, cls, onclick, extra, iconName) {
+  return h('button', Object.assign({ type: 'button', class: 'btn ' + (cls || ''), onclick }, extra || {}), iconName ? icon(iconName) : null, label);
+}
+
+/** An icon from the shared set (ui.js); empty when it is not loaded (unit tests). */
+export function icon(name, opts) {
+  return window.SN ? window.SN.icon(name, opts) : null;
+}
+
+/** An icon-only control: it always carries its accessible name, a tooltip and its shortcut. */
+export function ibtn(name, label, onclick, extra) {
+  const x = extra || {};
+  return h('button', Object.assign({
+    type: 'button', class: 'ibtn ' + (x.cls || ''), onclick, 'aria-label': label, 'data-tip': x.tip || label,
+    'data-kbd': x.kbd || null, 'aria-keyshortcuts': x.keys || null, 'data-tip-at': x.at || null,
+  }, x.attrs || {}), icon(name, x.icon));
 }
 
 export function hex(v, w = 8) {

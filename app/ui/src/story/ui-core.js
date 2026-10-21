@@ -115,7 +115,7 @@ function decorate(el, fresh) {
   const cs = G.engine.state.clues[id];
   const wasFresh = el.classList.contains('fresh');
   const base = el.classList.contains('ch') ? 'ch hs' : 'hs';
-  el.setAttribute('class', base + ' v-' + (C ? C.volume : 'whisper') + ' st-' + status + (cs && cs.letgo && status === 'open' ? ' letgo' : ''));
+  el.setAttribute('class', base + ' v-' + (C ? C.volume : 'whisper') + ' st-' + status + (cs && cs.letgo && status === 'open' ? ' letgo' : '') + (G.popAnchor === el ? ' is-open' : ''));
   const live = status !== 'pending' && status !== 'closed' && status !== 'missing';
   if (live) { el.setAttribute('role', 'button'); el.tabIndex = 0; }
   else { el.removeAttribute('role'); el.removeAttribute('tabindex'); }

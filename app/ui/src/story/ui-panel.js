@@ -214,13 +214,13 @@ function passedRow(T, ts) {
 }
 
 /* ── case board: Elias's notebook ── */
-function pinList(items, key) {
+function pinList(items, key, neutral) {
   if (!items.length) return null;
   const st = G.engine.state;
   G.ui.open = G.ui.open || {};
   const folded = key && items.length > 4 && !G.ui.open[key];
   const shown = folded ? items.slice(0, 3) : items;
-  const ul = h('ul', { class: 'pins' }, shown.map(({ id, con }) => {
+  const ul = h('ul', { class: 'pins' + (neutral ? ' neutral' : '') }, shown.map(({ id, con }) => {
     const cs = st.clues[id] || {};
     return h('li', { class: con ? 'con' : '' }, fill(cs.obs || G.engine.observation(id)), h('span', { class: 'how' }, cs.followed || ''));
   }));
@@ -251,8 +251,8 @@ function boardView() {
           h('span', { class: 'ev', role: 'img', 'aria-label': x.pro.length + ' for, ' + x.con.length + ' against' }, dots(x.pro.length, 'pro'), dots(x.con.length, ''))),
         pinList(x.pro.map(id => ({ id, con: false })).concat(x.con.map(id => ({ id, con: true }))), x.id)))));
   }
-  if (B.loose.length) pad.append(h('section', { class: 'q' }, h('h3', null, 'Loose ends'), pinList(B.loose.map(id => ({ id, con: false })), 'loose')));
-  if (B.noise.length) pad.append(h('section', { class: 'q' }, h('h3', null, 'Noise'), pinList(B.noise.map(id => ({ id, con: false })), 'noise')));
+  if (B.loose.length) pad.append(h('section', { class: 'q' }, h('h3', null, 'Loose ends'), pinList(B.loose.map(id => ({ id, con: false })), 'loose', true)));
+  if (B.noise.length) pad.append(h('section', { class: 'q' }, h('h3', null, 'Noise'), pinList(B.noise.map(id => ({ id, con: false })), 'noise', true)));
   pad.append(h('p', { class: 'board-leg' }, 'Filled dot, +: supports. Hollow dot, −: weakens. Counts are the details you followed up, nothing more. Struck through: ruled out, still readable.'));
   return pad;
 }

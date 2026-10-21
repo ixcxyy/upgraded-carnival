@@ -313,7 +313,7 @@ button { cursor: pointer; }
 
 /* toast */
 .toast {
-  position: fixed; left: 50%; bottom: calc(26px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 100;
+  position: fixed; left: 50%; bottom: calc(112px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 100;
   display: inline-flex; align-items: center; gap: 10px; max-width: calc(100vw - 32px);
   padding: 0.6rem 1rem; border-radius: 999px; font-size: 0.88rem; color: var(--text);
   background: linear-gradient(0deg, var(--glass-milk), var(--glass-milk)), var(--glass);

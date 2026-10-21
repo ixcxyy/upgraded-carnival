@@ -47,7 +47,8 @@ function benchHarness(call = async () => true) {
     wave = {setTrace: __noop, setEvidence: __noop, setNow: __noop};
     board = {setLevels: __noop};
     globalThis.api = {S, saveFile, saveAll, closeFile, reloadFromDisk, close,
-      doBuild, doRun, doSubmit, doDebug, switchAway};
+      doBuild, doRun, doSubmit, doDebug, switchAway,
+      removeFile: typeof removeFile === 'function' ? removeFile : undefined};
   `, ctx);
   const add = (p, text, dirty = true) => { buffers.set(p, { text, dirty, revision: {} }); if (!ctx.api.S.open.includes(p)) ctx.api.S.open.push(p); current = p; };
   return { ctx, api: ctx.api, editor, buffers, add, profile, data, messages };
@@ -291,6 +292,38 @@ test('desktop close waits for writes; a failure stays open and a retry can close
   assert.equal(destroyed, 1);
 });
 
+test('an autosave chain in flight cannot recreate a file after it is deleted', async () => {
+  const first = deferred(); const log = []; let disk = 'exists';
+  const h = benchHarness(async (cmd, a) => {
+    log.push(cmd);
+    if (cmd === 'ws_write') { if (log.filter(c => c === 'ws_write').length === 1) await first.promise; disk = a.text; return true; }
+    if (cmd === 'ws_delete') { disk = null; return true; }
+    return { files: [] };
+  });
+  const p = 'tasks/1.1/util.c';
+  h.add(p, 'v1');
+  const saving = h.api.saveFile(p);        // write of v1 is in flight
+  h.add(p, 'v2');                          // newer typing: the chain would write v2 next
+  const removing = h.api.removeFile({ path: p, name: 'util.c' });
+  await tick(); first.resolve();
+  await Promise.all([saving, removing]);
+  assert.equal(disk, null);
+  assert.equal(log.lastIndexOf('ws_write') < log.indexOf('ws_delete'), true);
+});
+
+test('starting the debugger drops evidence and cursors that belong to an earlier run', async () => {
+  const calls = [];
+  const h = benchHarness(async cmd => cmd === 'dbg_start' ? { ok: true, state: { now: 0 }, build: {} } : {});
+  vm.runInContext(`
+    wave = {setTrace: __noop, setNow: __noop, setEvidence: e => __calls.push(['evidence', e]), clearCursors: () => __calls.push(['cursors'])};
+    enterDebugUi = __noop; onStop = async () => {}; updateDbgUi = __noop;
+    dbgPanel = { stop: __noop, armWatches: async () => {} };
+    ui.own = {hidden: true}; S.seed = 1;
+  `, Object.assign(h.ctx, { __calls: calls }));
+  await h.api.doDebug();
+  assert.equal(JSON.stringify(calls), JSON.stringify([['evidence', null], ['cursors']]));
+});
+
 function renderHarness(file, exports) {
   const h = (tag, attrs, ...children) => ({
     tag, attrs, children: children.flat(Infinity).filter(x => x !== null && x !== undefined && x !== false),
@@ -298,7 +331,8 @@ function renderHarness(file, exports) {
     get textContent() { return this.children.map(x => typeof x === 'object' ? x.textContent : String(x)).join(''); },
   });
   const put = (host, ...kids) => { host.children = kids.flat(Infinity).filter(x => x !== null && x !== undefined && x !== false); };
-  const ctx = vm.createContext({ h, put, btn: () => h('button'), fmtT: String, hex: String, plural: (n, word) => n + ' ' + word, basename: String });
+  // icon() renders nothing without ui.js, exactly as util.js does when window.SN is absent.
+  const ctx = vm.createContext({ h, put, btn: () => h('button'), icon: () => null, ibtn: () => h('button'), fmtT: String, hex: String, plural: (n, word) => n + ' ' + word, basename: String });
   vm.runInContext(source(file).replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, '') + '\n globalThis.api = {' + exports + '};', ctx);
   return { api: ctx.api, host: h('div') };
 }

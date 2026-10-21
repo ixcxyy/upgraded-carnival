@@ -10,7 +10,10 @@ function closePop(instant) {
   G.popAnchor = null;
   if (anchor) anchor.classList.remove('is-open');
   const hadFocus = pop.contains(document.activeElement);
-  if (hadFocus && anchor && anchor.isConnected && anchor.getAttribute('tabindex') === '0') anchor.focus({ preventScroll: true });
+  // Focus goes back where it came from: to the phrase when it was opened from the keyboard. Opened
+  // with the pointer, focus leaves the card altogether, so Space goes on reading as before.
+  if (hadFocus && G.popByKey && anchor && anchor.isConnected && anchor.getAttribute('tabindex') === '0') anchor.focus({ preventScroll: true });
+  else if (hadFocus) document.activeElement.blur();
   if (instant || reducedMotion() || !SNX() || !anchor || !anchor.isConnected || window.innerWidth <= 560) { pop.remove(); return; }
   pop.style.pointerEvents = 'none';
   SNX().motion.animate(pop, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(0.6, 0.3)' }], { dur: 170, ease: SNX().motion.EASE.in, key: 'grow' })
@@ -23,10 +26,11 @@ function followPop(scroller) {
   if (!G.popAnchor.isConnected || a.bottom < box.top || a.top > box.bottom) { closePop(); return; }
   placePop(G.pop, G.popAnchor);
 }
-function openClue(id, anchor) {
+function openClue(id, anchor, byKey) {
   const info = G.engine.notice(id);
   if (!info) return;
   closePop(true);
+  G.popByKey = !!byKey;
   const act = a => () => {
     closePop();
     G.engine.act(id, a.id);
@@ -686,7 +690,7 @@ function applyStory(files, custom, fresh) {
 /* ── wiring and boot ── */
 function onDocClick(ev) {
   const t = ev.target.closest && ev.target.closest('[data-clue]');
-  if (t && t.getAttribute('role') === 'button') { ev.preventDefault(); openClue(t.dataset.clue, t); return; }
+  if (t && t.getAttribute('role') === 'button') { ev.preventDefault(); openClue(t.dataset.clue, t, ev.detail === 0); return; }
   if (G.pop && !(ev.target.closest && ev.target.closest('.pop'))) closePop();
 }
 function onKey(ev) {
@@ -696,7 +700,7 @@ function onKey(ev) {
     if (G.pop) { closePop(); ev.preventDefault(); return; }
     if (G.ui.sheet) { closeSheet(); ev.preventDefault(); return; }
   }
-  if ((ev.key === 'Enter' || ev.key === ' ') && t && t.matches && t.matches('[data-clue][role="button"]')) { ev.preventDefault(); openClue(t.dataset.clue, t); return; }
+  if ((ev.key === 'Enter' || ev.key === ' ') && t && t.matches && t.matches('[data-clue][role="button"]')) { ev.preventDefault(); openClue(t.dataset.clue, t, true); return; }
   if (!$('#title').hidden || G.ui.sheet || G.pop) return;
   if ($('#app').classList.contains('benching')) return;
   if (ev.altKey || ev.ctrlKey || ev.metaKey) return;
