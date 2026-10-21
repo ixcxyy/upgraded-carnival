@@ -1,0 +1,9 @@
+[package]
+name = "levels"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+k28 = { path = "../k28" }
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/k28", "crates/levels", "crates/k28-build", "crates/k28-cli", "crates/k28-app", "crates/k28-devserver"]
+exclude = ["app/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+object = { version = "0.36", default-features = false, features = ["read_core", "elf", "std"] }
+gimli = { version = "0.31", default-features = false, features = ["read", "std"] }
+
+[profile.release]
+opt-level = 3
+debug = false
+codegen-units = 4
+lto = "thin"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

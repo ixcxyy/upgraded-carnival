@@ -1,0 +1,13 @@
+[package]
+name = "k28"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+object.workspace = true
+gimli.workspace = true
+
+[dev-dependencies]
+k28-build = { path = "../k28-build" }

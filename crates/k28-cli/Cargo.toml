@@ -1,0 +1,16 @@
+[package]
+name = "k28-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "k28"
+path = "src/main.rs"
+
+[dependencies]
+k28 = { path = "../k28" }
+k28-build = { path = "../k28-build" }
+levels = { path = "../levels" }
+serde.workspace = true
+serde_json.workspace = true
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }

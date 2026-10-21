@@ -1,0 +1,8 @@
+[package]
+name = "k28-devserver"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+k28-app = { path = "../k28-app" }
+serde_json.workspace = true

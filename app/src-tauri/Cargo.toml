@@ -1,0 +1,34 @@
+[package]
+name = "signal-noise"
+version = "0.1.0"
+description = "Signal / Noise: a story about reading hardware, and people. Write C for an emulated microcontroller."
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "signal-noise"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde_json = "1"
+dunce = "1"
+k28-app = { path = "../../crates/k28-app" }
+
+# The emulator has to be fast even in development builds.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.k28]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = "debuginfo"

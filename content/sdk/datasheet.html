@@ -1,0 +1,614 @@
+<h1>K28 — Microcontroller Datasheet</h1>
+<p>Arnholt Systemtechnik · internal edition · revision 1</p>
+<p>The K28 is a 32-bit microcontroller: a RISC-V RV32IMC core at 100 MHz, 256 KB of flash, 64 KB of RAM, and a small set of peripherals in the style of the TMS320F28x family — clock gates, pin muxing, protected registers, CPU timers, a vectored interrupt expander (PIE) and a UART (SCI).</p>
+<p>Everything in this document is what the emulator actually does, to the cycle. Where a real chip would be vague, this one is exact.</p>
+<h2>1. At a glance</h2>
+<table><thead><tr><th></th><th></th></tr></thead><tbody>
+<tr><td>Core</td><td>RV32IMC + Zicsr, machine mode only</td></tr>
+<tr><td>Clock</td><td>100 MHz. <strong>1 cycle = 10 ns</strong>, 1 µs = 100 cycles, 1 ms = 100,000 cycles</td></tr>
+<tr><td>Flash</td><td>256 KB at <code>0x0000_0000</code>, read and execute; writes fault</td></tr>
+<tr><td>RAM</td><td>64 KB at <code>0x2000_0000</code>, powers up full of <code>0xA5</code></td></tr>
+<tr><td>Peripherals</td><td>4 KB blocks from <code>0x4000_0000</code>; 32-bit accesses only</td></tr>
+<tr><td>Pins</td><td>32: <code>PA0</code>–<code>PA15</code>, <code>PB0</code>–<code>PB15</code></td></tr>
+<tr><td>Interrupts</td><td>6 vectors through the PIE, 8 priority levels, hardware nesting</td></tr>
+</tbody></table>
+<h3>Memory map</h3>
+<table><thead><tr><th>Address</th><th>Size</th><th>Region</th></tr></thead><tbody>
+<tr><td><code>0x0000_0000</code></td><td>256 KB</td><td>Flash. Word 0: initial <code>sp</code>. Word 1: reset handler.</td></tr>
+<tr><td><code>0x2000_0000</code></td><td>64 KB</td><td>RAM</td></tr>
+<tr><td><code>0x4000_0000</code></td><td>4 KB</td><td>SYSCTL — clocks, write protection, CLKOUT</td></tr>
+<tr><td><code>0x4000_1000</code></td><td>4 KB</td><td>GPIOA</td></tr>
+<tr><td><code>0x4000_2000</code></td><td>4 KB</td><td>GPIOB</td></tr>
+<tr><td><code>0x4000_3000</code></td><td>4 KB</td><td>CPUTIMER0 (at <code>+0x000</code>) and CPUTIMER1 (at <code>+0x100</code>)</td></tr>
+<tr><td><code>0x4000_4000</code></td><td>4 KB</td><td>PIE — interrupt expander</td></tr>
+<tr><td><code>0x4000_7000</code></td><td>4 KB</td><td>SCI — serial port (UART)</td></tr>
+<tr><td><code>0x4000_F000</code></td><td>4 KB</td><td>DBGCON — the emulator's debug console (not a real peripheral)</td></tr>
+</tbody></table>
+<p>Anything else faults: a load or store to an address with nothing behind it stops the core with a named fault. So does a load from an unused offset <em>inside</em> a peripheral block. A chip that quietly returns zeros hides a bug for an hour; this one tells you.</p>
+<h2>2. Reset and boot</h2>
+<p>At power-on:</p>
+<ul>
+<li>The core reads <strong>flash word 0</strong> into <code>sp</code> and <strong>flash word 1</strong> into <code>pc</code>, and starts executing there. All other registers are 0.</li>
+<li>RAM is filled with <code>0xA5A5A5A5</code>. Only what your startup code clears is zero.</li>
+<li>Every peripheral register takes the reset value listed in section 11. In particular: <strong>every peripheral clock is off</strong>, and <strong>every pin is muxed to its peripheral function</strong> (or to nothing), not to GPIO.</li>
+<li><code>CLKOUT</code> is running: PB6 powers up muxed to CLKOUT with a 2 kHz clock on it.</li>
+</ul>
+<p>If word 1 is not an even address in flash or RAM, or word 0 is not a word-aligned address in RAM (or the top of RAM), the core stops at once with <code>BAD_BOOT</code>.</p>
+<p>The SDK's <code>startup.S</code> provides the boot header and a reset handler that copies <code>.data</code>, clears <code>.bss</code>, clears a RAM vector table <code>__vectors</code> and points <code>PIE.VBASE</code> at it, then calls <code>main</code>. If <code>main</code> returns, its return value is written to <code>DBGCON.EXIT</code>.</p>
+<h3>Writing the reset path yourself</h3>
+<p>With no <code>startup.S</code>, your program has to provide the boot header. The linker script places section <code>.boot</code> at address 0 and refuses to link without it:</p>
+<pre><code class="language-c">extern uint32_t _stack_top[], _sidata[], _sdata[], _edata[], _sbss[], _ebss[];
+void reset_handler(void);
+
+__attribute__((section(".boot"), used))
+void *const boot_header[2] = { _stack_top, (void *)reset_handler };
+</code></pre>
+<p>Because the core loads <code>sp</code> from the header, the reset handler can be plain C: copy <code>.data</code> (from <code>_sidata</code> to <code>_sdata</code>…<code>_edata</code>), zero <code>.bss</code> (<code>_sbss</code>…<code>_ebss</code>), set up the interrupt vector table, call <code>main</code>.</p>
+<h2>3. The core</h2>
+<p>RV32IMC: the base integer instructions, multiply/divide, compressed instructions, and the CSR instructions. There is no floating point, no MMU, no caches and no pipeline to reason about: every instruction takes the fixed number of cycles in the table below.</p>
+<h3>Cycle table</h3>
+<table><thead><tr><th>Instructions</th><th>Cycles</th></tr></thead><tbody>
+<tr><td>ALU: <code>add</code>, <code>addi</code>, <code>lui</code>, <code>auipc</code>, shifts, logic, <code>slt</code>…</td><td>1</td></tr>
+<tr><td>Loads <code>lb</code> <code>lh</code> <code>lw</code> <code>lbu</code> <code>lhu</code></td><td>2, <strong>+1</strong> from a peripheral register</td></tr>
+<tr><td>Stores <code>sb</code> <code>sh</code> <code>sw</code></td><td>1, <strong>+1</strong> to a peripheral register</td></tr>
+<tr><td>Branches</td><td>1 not taken, 3 taken</td></tr>
+<tr><td><code>jal</code></td><td>2</td></tr>
+<tr><td><code>jalr</code> (including <code>ret</code>)</td><td>3</td></tr>
+<tr><td><code>mul</code> <code>mulh</code> <code>mulhsu</code> <code>mulhu</code></td><td>3</td></tr>
+<tr><td><code>div</code> <code>divu</code> <code>rem</code> <code>remu</code></td><td>34</td></tr>
+<tr><td>CSR instructions</td><td>2</td></tr>
+<tr><td><code>mret</code></td><td>3</td></tr>
+<tr><td><code>wfi</code></td><td>2, then the core sleeps until an interrupt is pending</td></tr>
+<tr><td><code>fence</code></td><td>1</td></tr>
+<tr><td>Taking an interrupt</td><td>6, after the current instruction finishes</td></tr>
+</tbody></table>
+<p>A compressed instruction costs the same as its 32-bit form. Loop overhead at <code>-O0</code> is real: every local variable lives on the stack, so <code>i++</code> is a load, an add and a store. Measure with two breakpoints and the cycle counter.</p>
+<h3>CSRs</h3>
+<table><thead><tr><th>CSR</th><th>Number</th><th></th></tr></thead><tbody>
+<tr><td><code>mstatus</code></td><td><code>0x300</code></td><td>bit 3 <code>MIE</code>: interrupts enabled. bit 7 <code>MPIE</code>. <code>MPP</code> reads as 3.</td></tr>
+<tr><td><code>mie</code></td><td><code>0x304</code></td><td>bit 11 <code>MEIE</code>: external interrupts. <strong>Resets to 1.</strong></td></tr>
+<tr><td><code>mip</code></td><td><code>0x344</code></td><td>bit 11 <code>MEIP</code>: the PIE has an enabled interrupt pending (read-only)</td></tr>
+<tr><td><code>mepc</code></td><td><code>0x341</code></td><td>where an interrupted program resumes</td></tr>
+<tr><td><code>mcause</code></td><td><code>0x342</code></td><td><code>0x8000000B</code> inside an interrupt handler</td></tr>
+<tr><td><code>mtvec</code></td><td><code>0x305</code></td><td>exists, but unused: exceptions stop the core, they do not trap</td></tr>
+<tr><td><code>mscratch</code>, <code>mtval</code></td><td><code>0x340</code>, <code>0x343</code></td><td>read/write</td></tr>
+<tr><td><code>mcycle</code>, <code>mcycleh</code></td><td><code>0xB00</code>, <code>0xB80</code></td><td>cycles since reset (also <code>cycle</code>/<code>time</code> at <code>0xC00</code>/<code>0xC01</code>)</td></tr>
+<tr><td><code>minstret</code>, <code>minstreth</code></td><td><code>0xB02</code>, <code>0xB82</code></td><td>instructions retired</td></tr>
+<tr><td><code>marchid</code></td><td><code>0xF12</code></td><td><code>0x28</code></td></tr>
+</tbody></table>
+<p>Read the cycle counter with <code>__asm__ volatile ("csrr %0, mcycle" : "=r"(c));</code>.</p>
+<h3>Faults</h3>
+<p>A fault stops the core, and the run, with a code and the address of the instruction that caused it. The debugger shows the source line.</p>
+<table><thead><tr><th>Code</th><th>Cause</th></tr></thead><tbody>
+<tr><td><code>ILLEGAL_INSTRUCTION</code></td><td>an instruction the core does not have, an unknown CSR, or a write to a read-only CSR</td></tr>
+<tr><td><code>LOAD_FAULT</code> / <code>STORE_FAULT</code></td><td>an address with nothing behind it</td></tr>
+<tr><td><code>MMIO_UNMAPPED</code></td><td>an offset inside a peripheral block with no register</td></tr>
+<tr><td><code>MMIO_WIDTH</code></td><td>an 8- or 16-bit access to a peripheral register</td></tr>
+<tr><td><code>LOAD_MISALIGNED</code> / <code>STORE_MISALIGNED</code></td><td>a 16-bit access to an odd address, a 32-bit access not on a multiple of 4</td></tr>
+<tr><td><code>STORE_TO_FLASH</code></td><td>flash is read-only while the core runs</td></tr>
+<tr><td><code>FETCH_FAULT</code> / <code>FETCH_MISALIGNED</code></td><td>jumping outside flash and RAM, or to an odd address</td></tr>
+<tr><td><code>STACK_OVERFLOW</code></td><td>touching the 256-byte guard below the stack (see section 10)</td></tr>
+<tr><td><code>VECTOR_BASE_UNSET</code></td><td>an interrupt was taken while <code>PIE.VBASE</code> is 0</td></tr>
+<tr><td><code>NULL_HANDLER</code> / <code>BAD_HANDLER</code></td><td>the vector table entry is 0, or not a code address (a poisoned table reads <code>0xA5A5A5A5</code>)</td></tr>
+<tr><td><code>NESTING_OVERFLOW</code></td><td>interrupts nested more than 8 deep</td></tr>
+<tr><td><code>ECALL</code> / <code>EBREAK</code></td><td>there is no operating system to call; <code>ebreak</code> without a debugger</td></tr>
+<tr><td><code>BAD_BOOT</code></td><td>the boot header does not describe a stack and a reset handler</td></tr>
+</tbody></table>
+<h2>4. Clocks and protection — SYSCTL</h2>
+<p>Every peripheral block except the PIE and DBGCON has a clock gate in <code>SYSCTL.PCLKCR</code>, and every gate is <strong>off at reset</strong>. A block whose clock is off <strong>reads as 0 and ignores writes</strong> — no fault, nothing. The debugger's register view still shows the latched values and marks the block <em>not clocked</em>.</p>
+<p>Some registers are <strong>PROTECTED</strong> (marked <code>RW/P</code>): writes to them are ignored unless the protection is unlocked. Write <code>0xEA11</code> to <code>SYSCTL.PROTECT</code> to unlock, and <code>0xED15</code> to lock again. <code>PROTECT</code> reads 1 while unlocked. Lock it again when you are done: an unlocked chip is one stray pointer away from rewiring its own pins.</p>
+<p><code>CLKOUT</code> puts a divided system clock on PB6 (while PB6 is muxed to CLKOUT): f = 100 MHz / <code>CLKOUTDIV</code>, 50 % duty (the high half is the longer one when <code>CLKOUTDIV</code> is odd). Changing <code>CLKOUTCR</code> or <code>CLKOUTDIV</code> restarts the output with a rising edge.</p>
+<h3 id="regs-SYSCTL">SYSCTL registers</h3>
+<p>Base address <code>0x4000_0000</code>.</p>
+<table><thead><tr><th>Offset</th><th>Register</th><th>Access</th><th>Reset</th><th></th></tr></thead><tbody>
+<tr><td><code>+0x000</code></td><td><a href="#reg-SYSCTL-DEVID">DEVID</a></td><td>RO</td><td><code>0x00280001</code></td><td>Device ID: K28, revision 1</td></tr>
+<tr><td><code>+0x004</code></td><td><a href="#reg-SYSCTL-RESC">RESC</a></td><td>RO</td><td><code>0x00000001</code></td><td>Reset cause</td></tr>
+<tr><td><code>+0x008</code></td><td><a href="#reg-SYSCTL-PROTECT">PROTECT</a></td><td>KEY</td><td><code>0x00000000</code></td><td>Write protection for PROTECTED registers</td></tr>
+<tr><td><code>+0x010</code></td><td><a href="#reg-SYSCTL-PCLKCR">PCLKCR</a></td><td>RW</td><td><code>0x00000000</code></td><td>Peripheral clock enables</td></tr>
+<tr><td><code>+0x014</code></td><td><a href="#reg-SYSCTL-CLKOUTCR">CLKOUTCR</a></td><td>RW</td><td><code>0x00000001</code></td><td>Clock output control</td></tr>
+<tr><td><code>+0x018</code></td><td><a href="#reg-SYSCTL-CLKOUTDIV">CLKOUTDIV</a></td><td>RW</td><td><code>0x0000C350</code></td><td>CLKOUT divider: f = 100 MHz / DIV, 50 % duty (high half rounded up)</td></tr>
+</tbody></table>
+<h4 id="reg-SYSCTL-DEVID">SYSCTL.DEVID</h4>
+<p><code>0x4000_0000</code> · RO · reset <code>0x00280001</code></p>
+<p>Device ID: K28, revision 1.</p>
+<h4 id="reg-SYSCTL-RESC">SYSCTL.RESC</h4>
+<p><code>0x4000_0004</code> · RO · reset <code>0x00000001</code></p>
+<p>Reset cause.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>0</td><td><code>POR</code></td><td>RO</td><td>Power-on reset.</td></tr>
+</tbody></table>
+<h4 id="reg-SYSCTL-PROTECT">SYSCTL.PROTECT</h4>
+<p><code>0x4000_0008</code> · KEY · reset <code>0x00000000</code></p>
+<p>Write protection for PROTECTED registers. Write 0xEA11 to unlock, 0xED15 to lock. Other values are ignored.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>0</td><td><code>UNLOCKED</code></td><td>RO</td><td>1 while unlocked.</td></tr>
+</tbody></table>
+<h4 id="reg-SYSCTL-PCLKCR">SYSCTL.PCLKCR</h4>
+<p><code>0x4000_0010</code> · RW · reset <code>0x00000000</code></p>
+<p>Peripheral clock enables. A block whose clock is off reads as 0 and ignores writes.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>0</td><td><code>GPIOA</code></td><td>RW</td><td>GPIOA clock.</td></tr>
+<tr><td>1</td><td><code>GPIOB</code></td><td>RW</td><td>GPIOB clock.</td></tr>
+<tr><td>2</td><td><code>TIMER0</code></td><td>RW</td><td>CPUTIMER0 clock.</td></tr>
+<tr><td>3</td><td><code>TIMER1</code></td><td>RW</td><td>CPUTIMER1 clock.</td></tr>
+<tr><td>5</td><td><code>SCI</code></td><td>RW</td><td>SCI clock.</td></tr>
+</tbody></table>
+<h4 id="reg-SYSCTL-CLKOUTCR">SYSCTL.CLKOUTCR</h4>
+<p><code>0x4000_0014</code> · RW · reset <code>0x00000001</code></p>
+<p>Clock output control.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>0</td><td><code>EN</code></td><td>RW</td><td>1 = CLKOUT runs. Resets to 1.</td></tr>
+</tbody></table>
+<h4 id="reg-SYSCTL-CLKOUTDIV">SYSCTL.CLKOUTDIV</h4>
+<p><code>0x4000_0018</code> · RW · reset <code>0x0000C350</code></p>
+<p>CLKOUT divider: f = 100 MHz / DIV, 50 % duty (high half rounded up). DIV &lt; 2 stops the output.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>15:0</td><td><code>DIV</code></td><td>RW</td><td>Divider.</td></tr>
+</tbody></table>
+<h2>5. Pins and GPIO</h2>
+<h3>What drives a pin</h3>
+<p>Each pin is resolved from three things: what the chip drives, what the board drives, and the chip's internal pull-up.</p>
+<ul>
+<li><strong>The chip drives</strong> a pin when it is muxed to GPIO (<code>MUX</code> bit = 0) and set as an output (<code>DIR</code> bit = 1), or when it is muxed to a peripheral output (CLKOUT, SCI TXD).</li>
+<li><strong>The board</strong> may drive a pin hard (a push-pull output, a button to a supply rail), pull it weakly through a resistor, or leave it open.</li>
+<li><strong>The pull-up</strong> (<code>PUE</code>, protected) pulls the pin high when nothing else drives it.</li>
+</ul>
+<p>A pin nothing drives or pulls is <strong>floating</strong>: a GPIO read returns noise, and the waveform shows it half-way between low and high. If the chip and the board drive a pin to opposite levels, that is <strong>contention</strong> — the checker reports it on every task, because on a real board it destroys a pin. An input pin must never be an output.</p>
+<h3>Pin functions</h3>
+<p>At reset every <code>MUX</code> bit is 1: each pin belongs to its peripheral function, or to nothing. A pin muxed to a peripheral is invisible to GPIO: its <code>DAT</code> bit reads 0, and writing its output latch does nothing to the pin. Clear the <code>MUX</code> bit to take a pin for GPIO.</p>
+<table><thead><tr><th>Pin</th><th>Function when <code>MUX</code> = 1</th><th>Direction</th></tr></thead><tbody>
+<tr><td>PA8</td><td>SCI RXD</td><td>input</td></tr>
+<tr><td>PB2</td><td>TIMER0 CAP (capture input)</td><td>input</td></tr>
+<tr><td>PB6</td><td>CLKOUT</td><td>output</td></tr>
+<tr><td>PB8</td><td>SCI TXD</td><td>output</td></tr>
+<tr><td>every other pin</td><td>nothing — the pin is not connected to anything inside the chip</td><td>—</td></tr>
+</tbody></table>
+<h3>Reading and writing</h3>
+<ul>
+<li><code>DAT</code> read: the level of each GPIO pin, right now. <code>DAT</code> write: the output latch.</li>
+<li><code>SET</code>, <code>CLEAR</code>, <code>TOGGLE</code>: write 1s to change only those bits of the latch. Zeros are ignored, so no read-modify-write is needed, and several pins change in the same cycle.</li>
+<li>The latch keeps its value while a pin is an input; it appears on the pin when <code>DIR</code> makes it an output.</li>
+</ul>
+<h3>Edge detection</h3>
+<p>For GPIO pins, a low→high change sets the pin's <code>INTFLG</code> bit if its <code>INTRISE</code> bit is set, and a high→low change does the same with <code>INTFALL</code>. Changes to or from <em>floating</em> do not count. <code>INTFLG</code> is <strong>write-1-to-clear</strong>. A set <code>INTFLG</code> bit whose <code>INTEN</code> bit is also set requests the port's PIE vector (vector 1 for GPIOA, 2 for GPIOB). Edge detection needs the port's clock.</p>
+<h3 id="regs-GPIOA">GPIOA registers</h3>
+<p>Base address <code>0x4000_1000</code>.</p>
+<table><thead><tr><th>Offset</th><th>Register</th><th>Access</th><th>Reset</th><th></th></tr></thead><tbody>
+<tr><td><code>+0x000</code></td><td><a href="#reg-GPIOA-MUX">MUX</a></td><td>RW</td><td><code>0x0000FFFF</code></td><td>Pin function select</td></tr>
+<tr><td><code>+0x004</code></td><td><a href="#reg-GPIOA-DIR">DIR</a></td><td>RW</td><td><code>0x00000000</code></td><td>Direction of GPIO pins</td></tr>
+<tr><td><code>+0x008</code></td><td><a href="#reg-GPIOA-DAT">DAT</a></td><td>RW</td><td><code>0x00000000</code></td><td>Read: the level on each GPIO pin (0 for pins muxed to a peripheral; a floating pin reads noise)</td></tr>
+<tr><td><code>+0x00C</code></td><td><a href="#reg-GPIOA-SET">SET</a></td><td>WO</td><td><code>0x00000000</code></td><td>Write 1 to set a pin's output latch</td></tr>
+<tr><td><code>+0x010</code></td><td><a href="#reg-GPIOA-CLEAR">CLEAR</a></td><td>WO</td><td><code>0x00000000</code></td><td>Write 1 to clear a pin's output latch</td></tr>
+<tr><td><code>+0x014</code></td><td><a href="#reg-GPIOA-TOGGLE">TOGGLE</a></td><td>WO</td><td><code>0x00000000</code></td><td>Write 1 to invert a pin's output latch</td></tr>
+<tr><td><code>+0x018</code></td><td><a href="#reg-GPIOA-PUE">PUE</a></td><td>RW/P</td><td><code>0x00000000</code></td><td>Internal pull-up enable</td></tr>
+<tr><td><code>+0x01C</code></td><td><a href="#reg-GPIOA-INTRISE">INTRISE</a></td><td>RW</td><td><code>0x00000000</code></td><td>Rising-edge detect enable (GPIO pins only)</td></tr>
+<tr><td><code>+0x020</code></td><td><a href="#reg-GPIOA-INTFALL">INTFALL</a></td><td>RW</td><td><code>0x00000000</code></td><td>Falling-edge detect enable (GPIO pins only)</td></tr>
+<tr><td><code>+0x024</code></td><td><a href="#reg-GPIOA-INTFLG">INTFLG</a></td><td>W1C</td><td><code>0x00000000</code></td><td>Edge detected</td></tr>
+<tr><td><code>+0x028</code></td><td><a href="#reg-GPIOA-INTEN">INTEN</a></td><td>RW</td><td><code>0x00000000</code></td><td>Interrupt enable: a set INTFLG bit with its INTEN bit requests the port's PIE vector</td></tr>
+</tbody></table>
+<h4 id="reg-GPIOA-MUX">GPIOA.MUX</h4>
+<p><code>0x4000_1000</code> · RW · reset <code>0x0000FFFF</code></p>
+<p>Pin function select. Every pin powers up muxed to its peripheral function (or to nothing).</p>
+<p>One bit per pin: bit <em>n</em> is PA<em>n</em>. 0 = GPIO, 1 = peripheral. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOA-DIR">GPIOA.DIR</h4>
+<p><code>0x4000_1004</code> · RW · reset <code>0x00000000</code></p>
+<p>Direction of GPIO pins.</p>
+<p>One bit per pin: bit <em>n</em> is PA<em>n</em>. 0 = input, 1 = output. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOA-DAT">GPIOA.DAT</h4>
+<p><code>0x4000_1008</code> · RW · reset <code>0x00000000</code></p>
+<p>Read: the level on each GPIO pin (0 for pins muxed to a peripheral; a floating pin reads noise). Write: the output latch.</p>
+<p>One bit per pin: bit <em>n</em> is PA<em>n</em>. 0 = low, 1 = high. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOA-SET">GPIOA.SET</h4>
+<p><code>0x4000_100C</code> · WO · reset <code>0x00000000</code></p>
+<p>Write 1 to set a pin's output latch. 0 bits are ignored. Reads 0.</p>
+<p>One bit per pin: bit <em>n</em> is PA<em>n</em>. 0 = no effect, 1 = set. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOA-CLEAR">GPIOA.CLEAR</h4>
+<p><code>0x4000_1010</code> · WO · reset <code>0x00000000</code></p>
+<p>Write 1 to clear a pin's output latch. 0 bits are ignored. Reads 0.</p>
+<p>One bit per pin: bit <em>n</em> is PA<em>n</em>. 0 = no effect, 1 = clear. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOA-TOGGLE">GPIOA.TOGGLE</h4>
+<p><code>0x4000_1014</code> · WO · reset <code>0x00000000</code></p>
+<p>Write 1 to invert a pin's output latch. 0 bits are ignored. Reads 0.</p>
+<p>One bit per pin: bit <em>n</em> is PA<em>n</em>. 0 = no effect, 1 = toggle. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOA-PUE">GPIOA.PUE</h4>
+<p><code>0x4000_1018</code> · RW/P · reset <code>0x00000000</code></p>
+<p>Internal pull-up enable. PROTECTED: writes are ignored unless SYSCTL.PROTECT is unlocked.</p>
+<p>One bit per pin: bit <em>n</em> is PA<em>n</em>. 0 = off, 1 = pull-up. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOA-INTRISE">GPIOA.INTRISE</h4>
+<p><code>0x4000_101C</code> · RW · reset <code>0x00000000</code></p>
+<p>Rising-edge detect enable (GPIO pins only).</p>
+<p>One bit per pin: bit <em>n</em> is PA<em>n</em>. 0 = off, 1 = detect. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOA-INTFALL">GPIOA.INTFALL</h4>
+<p><code>0x4000_1020</code> · RW · reset <code>0x00000000</code></p>
+<p>Falling-edge detect enable (GPIO pins only).</p>
+<p>One bit per pin: bit <em>n</em> is PA<em>n</em>. 0 = off, 1 = detect. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOA-INTFLG">GPIOA.INTFLG</h4>
+<p><code>0x4000_1024</code> · W1C · reset <code>0x00000000</code></p>
+<p>Edge detected. Write 1 to clear.</p>
+<p>One bit per pin: bit <em>n</em> is PA<em>n</em>. 0 = no effect, 1 = edge. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOA-INTEN">GPIOA.INTEN</h4>
+<p><code>0x4000_1028</code> · RW · reset <code>0x00000000</code></p>
+<p>Interrupt enable: a set INTFLG bit with its INTEN bit requests the port's PIE vector.</p>
+<p>One bit per pin: bit <em>n</em> is PA<em>n</em>. 0 = off, 1 = enabled. Bits 31:16 read 0.</p>
+<p>GPIOB has the same registers at <code>0x4000_2000</code>.</p>
+<h2>6. CPU timers — CPUTIMER0, CPUTIMER1</h2>
+<p>Two 32-bit down-counters, CPUTIMER0 at <code>0x4000_3000</code> and CPUTIMER1 at <code>0x4000_3100</code>.</p>
+<ul>
+<li>While running, <code>TIM</code> decreases by one every cycle. After it reaches 0 it <strong>reloads from <code>PRD</code></strong> and sets <code>TIF</code>. The timer therefore expires every <strong><code>PRD</code> + 1 cycles</strong>: for a 1 ms tick, <code>PRD</code> = 99 999.</li>
+<li>A timer runs when its clock is on and <code>TCR.TSS</code> is 0. <strong><code>TSS</code> resets to 1</strong>: a timer is stopped until you clear it.</li>
+<li>Writing 1 to <code>TCR.TRB</code> reloads <code>TIM</code> from <code>PRD</code> at once (and reads back as 0).</li>
+<li><code>TIF</code> is <strong>write-1-to-clear</strong>. Writing 0 does nothing; reading does nothing. With <code>TCR.TIE</code> set, <code>TIF</code> requests the timer's PIE vector (3 for CPUTIMER0, 4 for CPUTIMER1) until you clear it.</li>
+<li>With <code>PRD</code> = <code>0xFFFFFFFF</code> the timer is a free-running clock: the time between two readings is <code>(first - second)</code> in unsigned 32-bit arithmetic, correct across the wrap.</li>
+<li>CPUTIMER0 <strong>capture</strong>: while PB2 is muxed to TIMER0 CAP, a rising edge on PB2 copies <code>TIM</code> into <code>CAP</code> and sets <code>TIF.CAPF</code>.</li>
+</ul>
+<p><strong>Debug halts.</strong> A bench debugger can halt the core. While it is halted, a timer with <code>TCR.FREE</code> = 0 freezes with it; with <code>FREE</code> = 1 it keeps counting, and its interrupt waits until the core runs again. Pick <code>FREE</code> = 1 for anything that keeps real time.</p>
+<h3 id="regs-CPUTIMER0">CPUTIMER0 registers</h3>
+<p>Base address <code>0x4000_3000</code>.</p>
+<table><thead><tr><th>Offset</th><th>Register</th><th>Access</th><th>Reset</th><th></th></tr></thead><tbody>
+<tr><td><code>+0x000</code></td><td><a href="#reg-CPUTIMER0-TIM">TIM</a></td><td>RW</td><td><code>0xFFFFFFFF</code></td><td>Counter</td></tr>
+<tr><td><code>+0x004</code></td><td><a href="#reg-CPUTIMER0-PRD">PRD</a></td><td>RW</td><td><code>0xFFFFFFFF</code></td><td>Period</td></tr>
+<tr><td><code>+0x008</code></td><td><a href="#reg-CPUTIMER0-TCR">TCR</a></td><td>RW</td><td><code>0x00000010</code></td><td>Control</td></tr>
+<tr><td><code>+0x00C</code></td><td><a href="#reg-CPUTIMER0-TIF">TIF</a></td><td>W1C</td><td><code>0x00000000</code></td><td>Flags</td></tr>
+<tr><td><code>+0x010</code></td><td><a href="#reg-CPUTIMER0-CAP">CAP</a></td><td>RO</td><td><code>0x00000000</code></td><td>TIM latched on a rising edge of PB2 while PB2 is muxed to TIMER0 CAP</td></tr>
+</tbody></table>
+<h4 id="reg-CPUTIMER0-TIM">CPUTIMER0.TIM</h4>
+<p><code>0x4000_3000</code> · RW · reset <code>0xFFFFFFFF</code></p>
+<p>Counter. Counts down once per cycle while running. After reaching 0 it reloads from PRD and sets TIF, so the timer expires every PRD+1 cycles. Writing sets the counter.</p>
+<h4 id="reg-CPUTIMER0-PRD">CPUTIMER0.PRD</h4>
+<p><code>0x4000_3004</code> · RW · reset <code>0xFFFFFFFF</code></p>
+<p>Period. Loaded into TIM at every expiry and on TRB.</p>
+<h4 id="reg-CPUTIMER0-TCR">CPUTIMER0.TCR</h4>
+<p><code>0x4000_3008</code> · RW · reset <code>0x00000010</code></p>
+<p>Control.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>4</td><td><code>TSS</code></td><td>RW</td><td>1 = stopped. Resets to 1.</td></tr>
+<tr><td>5</td><td><code>TRB</code></td><td>WO</td><td>Write 1: reload TIM from PRD now. Reads 0.</td></tr>
+<tr><td>11</td><td><code>FREE</code></td><td>RW</td><td>1 = keep counting while a debug probe halts the core. 0 = freeze with the core.</td></tr>
+<tr><td>14</td><td><code>TIE</code></td><td>RW</td><td>Interrupt enable: TIF requests the timer's PIE vector.</td></tr>
+</tbody></table>
+<h4 id="reg-CPUTIMER0-TIF">CPUTIMER0.TIF</h4>
+<p><code>0x4000_300C</code> · W1C · reset <code>0x00000000</code></p>
+<p>Flags. Write 1 to clear; writing 0 and reading have no effect.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>0</td><td><code>TIF</code></td><td>W1C</td><td>Set at every expiry.</td></tr>
+<tr><td>1</td><td><code>CAPF</code></td><td>W1C</td><td>TIM latched on a rising edge of PB2 while PB2 is muxed to TIMER0 CAP.</td></tr>
+</tbody></table>
+<h4 id="reg-CPUTIMER0-CAP">CPUTIMER0.CAP</h4>
+<p><code>0x4000_3010</code> · RO · reset <code>0x00000000</code></p>
+<p>TIM latched on a rising edge of PB2 while PB2 is muxed to TIMER0 CAP.</p>
+<h2>7. Interrupts — the PIE</h2>
+<p>The PIE collects six interrupt request lines, one per vector, and hands the most urgent one to the core.</p>
+<table><thead><tr><th>Vector</th><th>Source</th><th>Request line (clear it at the source)</th></tr></thead><tbody>
+<tr><td>1</td><td>GPIOA</td><td><code>GPIOA.INTFLG &amp; GPIOA.INTEN</code> ≠ 0</td></tr>
+<tr><td>2</td><td>GPIOB</td><td><code>GPIOB.INTFLG &amp; GPIOB.INTEN</code> ≠ 0</td></tr>
+<tr><td>3</td><td>CPUTIMER0</td><td><code>TIF</code> and <code>TIE</code></td></tr>
+<tr><td>4</td><td>CPUTIMER1</td><td><code>TIF</code> and <code>TIE</code></td></tr>
+<tr><td>5</td><td>SCI RX</td><td><code>RXIE</code> and (receive FIFO not empty, or <code>OE</code>)</td></tr>
+<tr><td>6</td><td>SCI TX</td><td><code>TXIE</code>, <code>TXEN</code>, and transmit FIFO empty</td></tr>
+</tbody></table>
+<p>Request lines are <strong>levels</strong>, not events. <code>PIE.IFR</code> shows them; you cannot clear them there. A handler that does not clear its source flag returns straight into itself.</p>
+<h3>Four switches</h3>
+<p>An interrupt reaches your handler only when all of these are on:</p>
+<ol>
+<li>the <strong>source</strong> requests it (for example <code>TIE</code> and <code>TIF</code>, or <code>INTEN</code> and an <code>INTFLG</code> bit),</li>
+<li>its <strong>PIE enable</strong>: bit <em>n</em> of <code>PIE.IER</code>, and <code>PIE.CTRL.EN</code>,</li>
+<li>the <strong>core</strong>: <code>mstatus.MIE</code> (and <code>mie.MEIE</code>, which resets to 1),</li>
+<li>a <strong>vector</strong>: the word at <code>PIE.VBASE</code> + 4·<em>n</em> holds the handler's address.</li>
+</ol>
+<h3>Taking an interrupt</h3>
+<p>Between instructions, if the conditions above hold, the core takes the pending vector with the lowest <code>PRIO</code> value (ties go to the lower vector number) — but only if it is <strong>more urgent than the vector already being serviced</strong>. Then, in 6 cycles, it:</p>
+<ul>
+<li>pushes <code>mepc</code> and <code>mstatus.MPIE</code> onto an 8-deep hardware stack,</li>
+<li>sets <code>mepc</code> to the interrupted instruction, <code>mcause</code> to <code>0x8000000B</code>, <code>MPIE</code> to <code>MIE</code> and <code>MIE</code> to 0,</li>
+<li>jumps to the handler address from the vector table.</li>
+</ul>
+<p><code>mret</code> does the reverse: <code>MIE</code> = <code>MPIE</code>, <code>pc</code> = <code>mepc</code>, and the saved <code>mepc</code> and <code>MPIE</code> come back from the hardware stack. The PIE's in-service level ends with the <code>mret</code>.</p>
+<p>Write handlers with the compiler's interrupt attribute, which saves the registers the handler uses and ends with <code>mret</code>:</p>
+<pre><code class="language-c">static void __attribute__((interrupt("machine"))) timer0_isr(void)
+{
+    CPUTIMER0_TIF = 1;      /* clear the source, or come straight back */
+    ...
+}
+</code></pre>
+<p><strong>Nesting.</strong> Inside a handler <code>MIE</code> is 0, so nothing interrupts it. To let a more urgent vector preempt a long handler, set <code>MIE</code> again once the handler has cleared its own flag: <code>__asm__ volatile ("csrs mstatus, 8");</code>. Only vectors with a lower <code>PRIO</code> value than the running one get in. The hardware stack keeps <code>mepc</code> safe; you do not have to save it.</p>
+<p><strong>The vector table.</strong> <code>VBASE</code> bits 7:0 always read 0, so the table must be 256-byte aligned. <code>startup.S</code> provides one in RAM, <code>__vectors</code>, already pointed at by <code>VBASE</code> and cleared to zero — attach a handler with <code>__vectors[3] = timer0_isr;</code>. A table in flash works too (see section 2).</p>
+<h3 id="regs-PIE">PIE registers</h3>
+<p>Base address <code>0x4000_4000</code>.</p>
+<table><thead><tr><th>Offset</th><th>Register</th><th>Access</th><th>Reset</th><th></th></tr></thead><tbody>
+<tr><td><code>+0x000</code></td><td><a href="#reg-PIE-CTRL">CTRL</a></td><td>RW</td><td><code>0x00000000</code></td><td>PIE control</td></tr>
+<tr><td><code>+0x004</code></td><td><a href="#reg-PIE-VBASE">VBASE</a></td><td>RW</td><td><code>0x00000000</code></td><td>Vector table base</td></tr>
+<tr><td><code>+0x008</code></td><td><a href="#reg-PIE-IER">IER</a></td><td>RW</td><td><code>0x00000000</code></td><td>Vector enables, bit n = vector n</td></tr>
+<tr><td><code>+0x00C</code></td><td><a href="#reg-PIE-IFR">IFR</a></td><td>RO</td><td><code>0x00000000</code></td><td>Request lines, bit n = vector n</td></tr>
+<tr><td><code>+0x010</code></td><td><a href="#reg-PIE-ACTIVE">ACTIVE</a></td><td>RO</td><td><code>0x00000000</code></td><td>Vector currently being serviced (innermost), 0 if none</td></tr>
+<tr><td><code>+0x024</code></td><td><a href="#reg-PIE-PRIO1">PRIO1</a></td><td>RW</td><td><code>0x00000007</code></td><td>Priority of vector 1 (GPIOA)</td></tr>
+<tr><td><code>+0x028</code></td><td><a href="#reg-PIE-PRIO2">PRIO2</a></td><td>RW</td><td><code>0x00000007</code></td><td>Priority of vector 2 (GPIOB)</td></tr>
+<tr><td><code>+0x02C</code></td><td><a href="#reg-PIE-PRIO3">PRIO3</a></td><td>RW</td><td><code>0x00000007</code></td><td>Priority of vector 3 (TIMER0)</td></tr>
+<tr><td><code>+0x030</code></td><td><a href="#reg-PIE-PRIO4">PRIO4</a></td><td>RW</td><td><code>0x00000007</code></td><td>Priority of vector 4 (TIMER1)</td></tr>
+<tr><td><code>+0x034</code></td><td><a href="#reg-PIE-PRIO5">PRIO5</a></td><td>RW</td><td><code>0x00000007</code></td><td>Priority of vector 5 (SCI RX)</td></tr>
+<tr><td><code>+0x038</code></td><td><a href="#reg-PIE-PRIO6">PRIO6</a></td><td>RW</td><td><code>0x00000007</code></td><td>Priority of vector 6 (SCI TX)</td></tr>
+</tbody></table>
+<h4 id="reg-PIE-CTRL">PIE.CTRL</h4>
+<p><code>0x4000_4000</code> · RW · reset <code>0x00000000</code></p>
+<p>PIE control.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>0</td><td><code>EN</code></td><td>RW</td><td>1 = the PIE forwards interrupts to the core.</td></tr>
+</tbody></table>
+<h4 id="reg-PIE-VBASE">PIE.VBASE</h4>
+<p><code>0x4000_4004</code> · RW · reset <code>0x00000000</code></p>
+<p>Vector table base. Bits 7:0 read as 0 (the table is 256-byte aligned). The handler for vector n is the 32-bit word at VBASE + 4*n.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>31:8</td><td><code>BASE</code></td><td>RW</td><td>Address bits 31:8.</td></tr>
+</tbody></table>
+<h4 id="reg-PIE-IER">PIE.IER</h4>
+<p><code>0x4000_4008</code> · RW · reset <code>0x00000000</code></p>
+<p>Vector enables, bit n = vector n.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>1</td><td><code>GPIOA</code></td><td>RW</td><td>Vector 1.</td></tr>
+<tr><td>2</td><td><code>GPIOB</code></td><td>RW</td><td>Vector 2.</td></tr>
+<tr><td>3</td><td><code>TIMER0</code></td><td>RW</td><td>Vector 3.</td></tr>
+<tr><td>4</td><td><code>TIMER1</code></td><td>RW</td><td>Vector 4.</td></tr>
+<tr><td>5</td><td><code>SCIRX</code></td><td>RW</td><td>Vector 5.</td></tr>
+<tr><td>6</td><td><code>SCITX</code></td><td>RW</td><td>Vector 6.</td></tr>
+</tbody></table>
+<h4 id="reg-PIE-IFR">PIE.IFR</h4>
+<p><code>0x4000_400C</code> · RO · reset <code>0x00000000</code></p>
+<p>Request lines, bit n = vector n. Follows the peripherals' flags: clear the flag at the source.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>1</td><td><code>GPIOA</code></td><td>RO</td><td>INTFLG &amp; INTEN != 0</td></tr>
+<tr><td>2</td><td><code>GPIOB</code></td><td>RO</td><td>INTFLG &amp; INTEN != 0</td></tr>
+<tr><td>3</td><td><code>TIMER0</code></td><td>RO</td><td>TIF &amp; TIE</td></tr>
+<tr><td>4</td><td><code>TIMER1</code></td><td>RO</td><td>TIF &amp; TIE</td></tr>
+<tr><td>5</td><td><code>SCIRX</code></td><td>RO</td><td>RXIE &amp; (FIFO not empty or OE)</td></tr>
+<tr><td>6</td><td><code>SCITX</code></td><td>RO</td><td>TXIE &amp; TXEN &amp; TX FIFO empty</td></tr>
+</tbody></table>
+<h4 id="reg-PIE-ACTIVE">PIE.ACTIVE</h4>
+<p><code>0x4000_4010</code> · RO · reset <code>0x00000000</code></p>
+<p>Vector currently being serviced (innermost), 0 if none.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>2:0</td><td><code>VECTOR</code></td><td>RO</td><td></td></tr>
+</tbody></table>
+<h4 id="reg-PIE-PRIO1">PIE.PRIO1</h4>
+<p><code>0x4000_4024</code> · RW · reset <code>0x00000007</code></p>
+<p>Priority of vector 1 (GPIOA). 0 = most urgent, 7 = least.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>2:0</td><td><code>PRIO</code></td><td>RW</td><td></td></tr>
+</tbody></table>
+<h4 id="reg-PIE-PRIO2">PIE.PRIO2</h4>
+<p><code>0x4000_4028</code> · RW · reset <code>0x00000007</code></p>
+<p>Priority of vector 2 (GPIOB).</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>2:0</td><td><code>PRIO</code></td><td>RW</td><td></td></tr>
+</tbody></table>
+<h4 id="reg-PIE-PRIO3">PIE.PRIO3</h4>
+<p><code>0x4000_402C</code> · RW · reset <code>0x00000007</code></p>
+<p>Priority of vector 3 (TIMER0).</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>2:0</td><td><code>PRIO</code></td><td>RW</td><td></td></tr>
+</tbody></table>
+<h4 id="reg-PIE-PRIO4">PIE.PRIO4</h4>
+<p><code>0x4000_4030</code> · RW · reset <code>0x00000007</code></p>
+<p>Priority of vector 4 (TIMER1).</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>2:0</td><td><code>PRIO</code></td><td>RW</td><td></td></tr>
+</tbody></table>
+<h4 id="reg-PIE-PRIO5">PIE.PRIO5</h4>
+<p><code>0x4000_4034</code> · RW · reset <code>0x00000007</code></p>
+<p>Priority of vector 5 (SCI RX).</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>2:0</td><td><code>PRIO</code></td><td>RW</td><td></td></tr>
+</tbody></table>
+<h4 id="reg-PIE-PRIO6">PIE.PRIO6</h4>
+<p><code>0x4000_4038</code> · RW · reset <code>0x00000007</code></p>
+<p>Priority of vector 6 (SCI TX).</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>2:0</td><td><code>PRIO</code></td><td>RW</td><td></td></tr>
+</tbody></table>
+<h2>8. Serial port — SCI</h2>
+<p>An 8N1 UART: one start bit, 8 data bits LSB first, one stop bit, no parity.</p>
+<ul>
+<li><code>BAUD</code> is the bit time in cycles: 100 MHz / <code>BAUD</code>. <code>BAUD</code> = 100 is 1 Mbaud. Values below 8 stop the receiver.</li>
+<li>The receiver needs its clock, <code>CTRL.RXEN</code>, and PA8 muxed to SCI RXD (its power-on function). It starts on a falling edge, samples each bit in the middle, and checks the stop bit. A stop bit that reads 0 sets <code>FE</code> and drops the byte.</li>
+<li>Received bytes go into a <strong>4-byte FIFO</strong>. <code>RXDATA</code> reads (and removes) the oldest. A byte that arrives when the FIFO is full is <strong>lost</strong> and sets <code>OE</code>. At 1 Mbaud a byte arrives every 10 µs: four bytes of FIFO is 40 µs of slack.</li>
+<li>Writing <code>TXDATA</code> pushes a byte into the 4-byte transmit FIFO (dropped if it is full or <code>TXEN</code> is 0); the transmitter shifts it out on PB8.</li>
+<li><code>OE</code> and <code>FE</code> are write-1-to-clear.</li>
+</ul>
+<p>The debugger's view of <code>RXDATA</code> shows the oldest byte without removing it.</p>
+<h3 id="regs-SCI">SCI registers</h3>
+<p>Base address <code>0x4000_7000</code>.</p>
+<table><thead><tr><th>Offset</th><th>Register</th><th>Access</th><th>Reset</th><th></th></tr></thead><tbody>
+<tr><td><code>+0x000</code></td><td><a href="#reg-SCI-CTRL">CTRL</a></td><td>RW</td><td><code>0x00000000</code></td><td>Control</td></tr>
+<tr><td><code>+0x004</code></td><td><a href="#reg-SCI-BAUD">BAUD</a></td><td>RW</td><td><code>0x00000000</code></td><td>Bit time in cycles: baud = 100 MHz / BAUD</td></tr>
+<tr><td><code>+0x008</code></td><td><a href="#reg-SCI-STAT">STAT</a></td><td>RO/W1C</td><td><code>0x00000006</code></td><td>Status</td></tr>
+<tr><td><code>+0x00C</code></td><td><a href="#reg-SCI-RXDATA">RXDATA</a></td><td>RO</td><td><code>0x00000000</code></td><td>Reading pops the oldest byte from the receive FIFO (0 if empty)</td></tr>
+<tr><td><code>+0x010</code></td><td><a href="#reg-SCI-TXDATA">TXDATA</a></td><td>WO</td><td><code>0x00000000</code></td><td>Writing pushes a byte into the 4-byte transmit FIFO (dropped if full or TXEN = 0)</td></tr>
+</tbody></table>
+<h4 id="reg-SCI-CTRL">SCI.CTRL</h4>
+<p><code>0x4000_7000</code> · RW · reset <code>0x00000000</code></p>
+<p>Control.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>0</td><td><code>RXEN</code></td><td>RW</td><td>Receiver enable (PA8 must be muxed to SCI RXD).</td></tr>
+<tr><td>1</td><td><code>TXEN</code></td><td>RW</td><td>Transmitter enable (PB8 muxed to SCI TXD).</td></tr>
+<tr><td>2</td><td><code>RXIE</code></td><td>RW</td><td>Interrupt while the receive FIFO is not empty (or OE is set).</td></tr>
+<tr><td>3</td><td><code>TXIE</code></td><td>RW</td><td>Interrupt while the transmit FIFO is empty.</td></tr>
+</tbody></table>
+<h4 id="reg-SCI-BAUD">SCI.BAUD</h4>
+<p><code>0x4000_7004</code> · RW · reset <code>0x00000000</code></p>
+<p>Bit time in cycles: baud = 100 MHz / BAUD. Frames are 8N1. Values below 8 stop the receiver.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>15:0</td><td><code>BAUD</code></td><td>RW</td><td></td></tr>
+</tbody></table>
+<h4 id="reg-SCI-STAT">SCI.STAT</h4>
+<p><code>0x4000_7008</code> · RO/W1C · reset <code>0x00000006</code></p>
+<p>Status.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>0</td><td><code>RXRDY</code></td><td>RO</td><td>Receive FIFO not empty.</td></tr>
+<tr><td>1</td><td><code>TXRDY</code></td><td>RO</td><td>Transmit FIFO not full.</td></tr>
+<tr><td>2</td><td><code>TXEMPTY</code></td><td>RO</td><td>Transmit FIFO empty.</td></tr>
+<tr><td>3</td><td><code>TXIDLE</code></td><td>RO</td><td>Transmit FIFO empty and the last stop bit sent.</td></tr>
+<tr><td>4</td><td><code>OE</code></td><td>W1C</td><td>Overrun: a byte arrived while the 4-byte receive FIFO was full, and was lost.</td></tr>
+<tr><td>5</td><td><code>FE</code></td><td>W1C</td><td>Framing error: a stop bit read 0.</td></tr>
+</tbody></table>
+<h4 id="reg-SCI-RXDATA">SCI.RXDATA</h4>
+<p><code>0x4000_700C</code> · RO · reset <code>0x00000000</code></p>
+<p>Reading pops the oldest byte from the receive FIFO (0 if empty). The debugger's view does not pop.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>7:0</td><td><code>DATA</code></td><td>RO</td><td></td></tr>
+</tbody></table>
+<h4 id="reg-SCI-TXDATA">SCI.TXDATA</h4>
+<p><code>0x4000_7010</code> · WO · reset <code>0x00000000</code></p>
+<p>Writing pushes a byte into the 4-byte transmit FIFO (dropped if full or TXEN = 0).</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>7:0</td><td><code>DATA</code></td><td>WO</td><td></td></tr>
+</tbody></table>
+<h2>9. Debug console — DBGCON</h2>
+<p><code>DBGCON</code> is not a peripheral any real chip has. It is the emulator's channel to the host: what you write appears in the console panel, with its cycle stamp, and the checkers read it where a work order asks for a report.</p>
+<table><thead><tr><th>Register</th><th></th></tr></thead><tbody>
+<tr><td><code>PUTC</code></td><td>print one character</td></tr>
+<tr><td><code>PUTW</code></td><td>print a 32-bit word as <code>0xXXXXXXXX</code> and a newline</td></tr>
+<tr><td><code>EXIT</code></td><td>stop the core with this exit code. Pins and peripherals keep running until the end of the run.</td></tr>
+<tr><td><code>TICK</code></td><td>writing counts one tick of a "background counter"; reading returns the count. Work orders use it to check that a main loop never blocks.</td></tr>
+<tr><td><code>MARK</code></td><td>put a numbered marker on the waveform at the current cycle</td></tr>
+</tbody></table>
+<h3 id="regs-DBGCON">DBGCON registers</h3>
+<p>Base address <code>0x4000_F000</code>.</p>
+<table><thead><tr><th>Offset</th><th>Register</th><th>Access</th><th>Reset</th><th></th></tr></thead><tbody>
+<tr><td><code>+0x000</code></td><td><a href="#reg-DBGCON-PUTC">PUTC</a></td><td>WO</td><td><code>0x00000000</code></td><td>Print one character to the host console</td></tr>
+<tr><td><code>+0x004</code></td><td><a href="#reg-DBGCON-PUTW">PUTW</a></td><td>WO</td><td><code>0x00000000</code></td><td>Print a 32-bit word to the host console as 0xXXXXXXXX and a newline</td></tr>
+<tr><td><code>+0x008</code></td><td><a href="#reg-DBGCON-EXIT">EXIT</a></td><td>WO</td><td><code>0x00000000</code></td><td>Stop the core with this exit code</td></tr>
+<tr><td><code>+0x00C</code></td><td><a href="#reg-DBGCON-TICK">TICK</a></td><td>RW</td><td><code>0x00000000</code></td><td>Write: count one background tick</td></tr>
+<tr><td><code>+0x010</code></td><td><a href="#reg-DBGCON-MARK">MARK</a></td><td>WO</td><td><code>0x00000000</code></td><td>Put a numbered marker on the waveform at the current cycle</td></tr>
+</tbody></table>
+<h4 id="reg-DBGCON-PUTC">DBGCON.PUTC</h4>
+<p><code>0x4000_F000</code> · WO · reset <code>0x00000000</code></p>
+<p>Print one character to the host console. Not a real peripheral: it is the emulator's print channel.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>7:0</td><td><code>CHAR</code></td><td>WO</td><td></td></tr>
+</tbody></table>
+<h4 id="reg-DBGCON-PUTW">DBGCON.PUTW</h4>
+<p><code>0x4000_F004</code> · WO · reset <code>0x00000000</code></p>
+<p>Print a 32-bit word to the host console as 0xXXXXXXXX and a newline.</p>
+<h4 id="reg-DBGCON-EXIT">DBGCON.EXIT</h4>
+<p><code>0x4000_F008</code> · WO · reset <code>0x00000000</code></p>
+<p>Stop the core with this exit code. Pins and peripherals keep running until the end of the run.</p>
+<h4 id="reg-DBGCON-TICK">DBGCON.TICK</h4>
+<p><code>0x4000_F00C</code> · RW · reset <code>0x00000000</code></p>
+<p>Write: count one background tick. Read: ticks so far.</p>
+<h4 id="reg-DBGCON-MARK">DBGCON.MARK</h4>
+<p><code>0x4000_F010</code> · WO · reset <code>0x00000000</code></p>
+<p>Put a numbered marker on the waveform at the current cycle.</p>
+<h2>10. Toolchain</h2>
+<p>Programs are compiled with the bundled <code>zig cc</code> (clang) for <code>riscv32</code>, freestanding:</p>
+<pre><code>-target riscv32-freestanding-none -mcpu=generic_rv32+m+c
+-ffreestanding -fno-builtin -nostdlib -fno-sanitize=undefined -fno-stack-protector
+-ffunction-sections -fdata-sections -Wl,--gc-sections
+-fno-omit-frame-pointer -mno-relax -std=gnu11 -Wall -g -O0
+</code></pre>
+<p>There is no C library: no <code>printf</code>, no <code>memcpy</code> unless you write one. <code>&lt;stdint.h&gt;</code>, <code>&lt;stdbool.h&gt;</code> and <code>&lt;stddef.h&gt;</code> are available. 64-bit division comes from the compiler's runtime.</p>
+<p><code>-O0</code> keeps every variable in memory and every line in order, so stepping is predictable. It also makes code slow: know your cycle table.</p>
+<h3>Linker script symbols</h3>
+<table><thead><tr><th>Symbol</th><th></th></tr></thead><tbody>
+<tr><td><code>_stack_top</code></td><td>top of RAM, <code>0x2001_0000</code>: the initial stack pointer</td></tr>
+<tr><td><code>_sidata</code></td><td>where the initial values of <code>.data</code> are stored in flash</td></tr>
+<tr><td><code>_sdata</code>, <code>_edata</code></td><td><code>.data</code> in RAM</td></tr>
+<tr><td><code>_sbss</code>, <code>_ebss</code></td><td><code>.bss</code> in RAM</td></tr>
+<tr><td><code>__vectors</code></td><td>the RAM vector table (defined by <code>startup.S</code>)</td></tr>
+<tr><td><code>__stack_guard_start</code>, <code>__stack_guard_end</code></td><td>256 bytes below the 8 KB stack; touching them is <code>STACK_OVERFLOW</code></td></tr>
+</tbody></table>
+<p>Sections: <code>.boot</code> goes first at address 0 (8 bytes, required); <code>.vectors</code> is placed in flash on a 256-byte boundary; <code>.vectors_ram</code> holds the RAM table.</p>
+<h3>Your library</h3>
+<p>Files in your library folder are compiled into an archive and linked into every task, except the exam. Only functions a task actually calls end up in its program, and a function defined in the task's own files takes precedence over one in the library.</p>
+<h2>11. Register reference</h2>
+<p>Access types: <strong>RW</strong> read/write · <strong>RO</strong> read-only (writes ignored) · <strong>WO</strong> write-only (reads 0) · <strong>W1C</strong> write 1 to clear · <strong>KEY</strong> see <code>PROTECT</code> · <strong>RW/P</strong> read/write, protected.</p>
+<h3 id="regs-GPIOB">GPIOB registers</h3>
+<p>Base address <code>0x4000_2000</code>.</p>
+<table><thead><tr><th>Offset</th><th>Register</th><th>Access</th><th>Reset</th><th></th></tr></thead><tbody>
+<tr><td><code>+0x000</code></td><td><a href="#reg-GPIOB-MUX">MUX</a></td><td>RW</td><td><code>0x0000FFFF</code></td><td>Pin function select</td></tr>
+<tr><td><code>+0x004</code></td><td><a href="#reg-GPIOB-DIR">DIR</a></td><td>RW</td><td><code>0x00000000</code></td><td>Direction of GPIO pins</td></tr>
+<tr><td><code>+0x008</code></td><td><a href="#reg-GPIOB-DAT">DAT</a></td><td>RW</td><td><code>0x00000000</code></td><td>Read: the level on each GPIO pin (0 for pins muxed to a peripheral; a floating pin reads noise)</td></tr>
+<tr><td><code>+0x00C</code></td><td><a href="#reg-GPIOB-SET">SET</a></td><td>WO</td><td><code>0x00000000</code></td><td>Write 1 to set a pin's output latch</td></tr>
+<tr><td><code>+0x010</code></td><td><a href="#reg-GPIOB-CLEAR">CLEAR</a></td><td>WO</td><td><code>0x00000000</code></td><td>Write 1 to clear a pin's output latch</td></tr>
+<tr><td><code>+0x014</code></td><td><a href="#reg-GPIOB-TOGGLE">TOGGLE</a></td><td>WO</td><td><code>0x00000000</code></td><td>Write 1 to invert a pin's output latch</td></tr>
+<tr><td><code>+0x018</code></td><td><a href="#reg-GPIOB-PUE">PUE</a></td><td>RW/P</td><td><code>0x00000000</code></td><td>Internal pull-up enable</td></tr>
+<tr><td><code>+0x01C</code></td><td><a href="#reg-GPIOB-INTRISE">INTRISE</a></td><td>RW</td><td><code>0x00000000</code></td><td>Rising-edge detect enable (GPIO pins only)</td></tr>
+<tr><td><code>+0x020</code></td><td><a href="#reg-GPIOB-INTFALL">INTFALL</a></td><td>RW</td><td><code>0x00000000</code></td><td>Falling-edge detect enable (GPIO pins only)</td></tr>
+<tr><td><code>+0x024</code></td><td><a href="#reg-GPIOB-INTFLG">INTFLG</a></td><td>W1C</td><td><code>0x00000000</code></td><td>Edge detected</td></tr>
+<tr><td><code>+0x028</code></td><td><a href="#reg-GPIOB-INTEN">INTEN</a></td><td>RW</td><td><code>0x00000000</code></td><td>Interrupt enable: a set INTFLG bit with its INTEN bit requests the port's PIE vector</td></tr>
+</tbody></table>
+<h4 id="reg-GPIOB-MUX">GPIOB.MUX</h4>
+<p><code>0x4000_2000</code> · RW · reset <code>0x0000FFFF</code></p>
+<p>Pin function select. Every pin powers up muxed to its peripheral function (or to nothing).</p>
+<p>One bit per pin: bit <em>n</em> is PB<em>n</em>. 0 = GPIO, 1 = peripheral. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOB-DIR">GPIOB.DIR</h4>
+<p><code>0x4000_2004</code> · RW · reset <code>0x00000000</code></p>
+<p>Direction of GPIO pins.</p>
+<p>One bit per pin: bit <em>n</em> is PB<em>n</em>. 0 = input, 1 = output. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOB-DAT">GPIOB.DAT</h4>
+<p><code>0x4000_2008</code> · RW · reset <code>0x00000000</code></p>
+<p>Read: the level on each GPIO pin (0 for pins muxed to a peripheral; a floating pin reads noise). Write: the output latch.</p>
+<p>One bit per pin: bit <em>n</em> is PB<em>n</em>. 0 = low, 1 = high. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOB-SET">GPIOB.SET</h4>
+<p><code>0x4000_200C</code> · WO · reset <code>0x00000000</code></p>
+<p>Write 1 to set a pin's output latch. 0 bits are ignored. Reads 0.</p>
+<p>One bit per pin: bit <em>n</em> is PB<em>n</em>. 0 = no effect, 1 = set. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOB-CLEAR">GPIOB.CLEAR</h4>
+<p><code>0x4000_2010</code> · WO · reset <code>0x00000000</code></p>
+<p>Write 1 to clear a pin's output latch. 0 bits are ignored. Reads 0.</p>
+<p>One bit per pin: bit <em>n</em> is PB<em>n</em>. 0 = no effect, 1 = clear. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOB-TOGGLE">GPIOB.TOGGLE</h4>
+<p><code>0x4000_2014</code> · WO · reset <code>0x00000000</code></p>
+<p>Write 1 to invert a pin's output latch. 0 bits are ignored. Reads 0.</p>
+<p>One bit per pin: bit <em>n</em> is PB<em>n</em>. 0 = no effect, 1 = toggle. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOB-PUE">GPIOB.PUE</h4>
+<p><code>0x4000_2018</code> · RW/P · reset <code>0x00000000</code></p>
+<p>Internal pull-up enable. PROTECTED: writes are ignored unless SYSCTL.PROTECT is unlocked.</p>
+<p>One bit per pin: bit <em>n</em> is PB<em>n</em>. 0 = off, 1 = pull-up. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOB-INTRISE">GPIOB.INTRISE</h4>
+<p><code>0x4000_201C</code> · RW · reset <code>0x00000000</code></p>
+<p>Rising-edge detect enable (GPIO pins only).</p>
+<p>One bit per pin: bit <em>n</em> is PB<em>n</em>. 0 = off, 1 = detect. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOB-INTFALL">GPIOB.INTFALL</h4>
+<p><code>0x4000_2020</code> · RW · reset <code>0x00000000</code></p>
+<p>Falling-edge detect enable (GPIO pins only).</p>
+<p>One bit per pin: bit <em>n</em> is PB<em>n</em>. 0 = off, 1 = detect. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOB-INTFLG">GPIOB.INTFLG</h4>
+<p><code>0x4000_2024</code> · W1C · reset <code>0x00000000</code></p>
+<p>Edge detected. Write 1 to clear.</p>
+<p>One bit per pin: bit <em>n</em> is PB<em>n</em>. 0 = no effect, 1 = edge. Bits 31:16 read 0.</p>
+<h4 id="reg-GPIOB-INTEN">GPIOB.INTEN</h4>
+<p><code>0x4000_2028</code> · RW · reset <code>0x00000000</code></p>
+<p>Interrupt enable: a set INTFLG bit with its INTEN bit requests the port's PIE vector.</p>
+<p>One bit per pin: bit <em>n</em> is PB<em>n</em>. 0 = off, 1 = enabled. Bits 31:16 read 0.</p>
+<h3 id="regs-CPUTIMER1">CPUTIMER1 registers</h3>
+<p>Base address <code>0x4000_3100</code>.</p>
+<table><thead><tr><th>Offset</th><th>Register</th><th>Access</th><th>Reset</th><th></th></tr></thead><tbody>
+<tr><td><code>+0x000</code></td><td><a href="#reg-CPUTIMER1-TIM">TIM</a></td><td>RW</td><td><code>0xFFFFFFFF</code></td><td>Counter</td></tr>
+<tr><td><code>+0x004</code></td><td><a href="#reg-CPUTIMER1-PRD">PRD</a></td><td>RW</td><td><code>0xFFFFFFFF</code></td><td>Period</td></tr>
+<tr><td><code>+0x008</code></td><td><a href="#reg-CPUTIMER1-TCR">TCR</a></td><td>RW</td><td><code>0x00000010</code></td><td>Control</td></tr>
+<tr><td><code>+0x00C</code></td><td><a href="#reg-CPUTIMER1-TIF">TIF</a></td><td>W1C</td><td><code>0x00000000</code></td><td>Flags</td></tr>
+<tr><td><code>+0x010</code></td><td><a href="#reg-CPUTIMER1-CAP">CAP</a></td><td>RO</td><td><code>0x00000000</code></td><td>Not connected on CPUTIMER1 (always 0)</td></tr>
+</tbody></table>
+<h4 id="reg-CPUTIMER1-TIM">CPUTIMER1.TIM</h4>
+<p><code>0x4000_3100</code> · RW · reset <code>0xFFFFFFFF</code></p>
+<p>Counter. Counts down once per cycle while running. After reaching 0 it reloads from PRD and sets TIF, so the timer expires every PRD+1 cycles. Writing sets the counter.</p>
+<h4 id="reg-CPUTIMER1-PRD">CPUTIMER1.PRD</h4>
+<p><code>0x4000_3104</code> · RW · reset <code>0xFFFFFFFF</code></p>
+<p>Period. Loaded into TIM at every expiry and on TRB.</p>
+<h4 id="reg-CPUTIMER1-TCR">CPUTIMER1.TCR</h4>
+<p><code>0x4000_3108</code> · RW · reset <code>0x00000010</code></p>
+<p>Control.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>4</td><td><code>TSS</code></td><td>RW</td><td>1 = stopped. Resets to 1.</td></tr>
+<tr><td>5</td><td><code>TRB</code></td><td>WO</td><td>Write 1: reload TIM from PRD now. Reads 0.</td></tr>
+<tr><td>11</td><td><code>FREE</code></td><td>RW</td><td>1 = keep counting while a debug probe halts the core. 0 = freeze with the core.</td></tr>
+<tr><td>14</td><td><code>TIE</code></td><td>RW</td><td>Interrupt enable: TIF requests the timer's PIE vector.</td></tr>
+</tbody></table>
+<h4 id="reg-CPUTIMER1-TIF">CPUTIMER1.TIF</h4>
+<p><code>0x4000_310C</code> · W1C · reset <code>0x00000000</code></p>
+<p>Flags. Write 1 to clear; writing 0 and reading have no effect.</p>
+<table><thead><tr><th>Bits</th><th>Field</th><th>Access</th><th></th></tr></thead><tbody>
+<tr><td>0</td><td><code>TIF</code></td><td>W1C</td><td>Set at every expiry.</td></tr>
+<tr><td>1</td><td><code>CAPF</code></td><td>W1C</td><td>Not connected on CPUTIMER1 (always 0).</td></tr>
+</tbody></table>
+<h4 id="reg-CPUTIMER1-CAP">CPUTIMER1.CAP</h4>
+<p><code>0x4000_3110</code> · RO · reset <code>0x00000000</code></p>
+<p>Not connected on CPUTIMER1 (always 0).</p>

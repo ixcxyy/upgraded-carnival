@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signal / Noise</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app" id="app" data-view="story">
+  <header class="topbar">
+    <button class="brand" id="brand" type="button" aria-label="Title screen">SIGNAL / NOISE</button>
+    <div class="where" id="where"></div>
+    <span class="saved" id="saved"></span>
+    <button class="btn ghost small" id="menu-btn" type="button">Menu</button>
+  </header>
+  <div class="main">
+    <section class="story" aria-label="Story">
+      <div class="stream" id="stream"><div class="stream-inner" id="stream-inner" role="log" aria-live="polite"></div></div>
+      <div class="dock"><div class="dock-inner" id="dock-inner"></div></div>
+    </section>
+    <aside class="panel" aria-label="Work order, case board and codex">
+      <nav class="tabs" id="panel-tabs" role="tablist" aria-label="Panel">
+        <button class="tab" role="tab" type="button" data-tab="work">Work order<span class="dot" hidden></span></button>
+        <button class="tab" role="tab" type="button" data-tab="board">Case board<span class="dot" hidden></span></button>
+        <button class="tab" role="tab" type="button" data-tab="codex">Codex<span class="dot" hidden></span></button>
+      </nav>
+      <div class="panel-body" id="panel-body"></div>
+    </aside>
+  </div>
+  <div class="bench" id="bench" hidden></div>
+  <nav class="mtabs" id="mtabs" aria-label="Views">
+    <button class="tab" type="button" data-view="story">Story</button>
+    <button class="tab" type="button" data-view="work">Work<span class="dot" hidden></span></button>
+    <button class="tab" type="button" data-view="board">Board<span class="dot" hidden></span></button>
+    <button class="tab" type="button" data-view="codex">Codex<span class="dot" hidden></span></button>
+  </nav>
+</div>
+<div class="title" id="title"><div class="title-inner" id="title-inner"></div></div>
+<div class="toast" id="toast" role="status" hidden></div>
+
+<!--STORY-->
+
+<script src="api.js"></script>
+<script src="bench.js"></script>
+<script src="story.js"></script>
+</body>
+</html>

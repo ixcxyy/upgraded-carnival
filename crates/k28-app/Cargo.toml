@@ -1,0 +1,11 @@
+[package]
+name = "k28-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+k28 = { path = "../k28" }
+k28-build = { path = "../k28-build" }
+levels = { path = "../levels" }
+serde.workspace = true
+serde_json.workspace = true

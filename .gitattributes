@@ -1,0 +1,7 @@
+# Same bytes on every platform: the story's hash (and so the saves) must not depend on the checkout.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
+*.bmp binary
+*.woff2 binary

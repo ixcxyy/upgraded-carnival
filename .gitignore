@@ -1,0 +1,12 @@
+# Build output
+/target/
+/app/src-tauri/target/
+/app/dist/
+/app/src-tauri/gen/
+
+# Downloaded, not committed: python3 toolchain/fetch-zig.py puts zig here (about 180 MB)
+/app/src-tauri/resources/zig/
+/toolchain/zig/
+
+/app/node_modules/
+*.AppImage
