@@ -77,7 +77,8 @@ body.dragging-h, body.dragging-h * { cursor: row-resize !important; user-select:
 
 .bb-opts { display: flex; align-items: center; gap: 10px; flex: none; }
 .seed-wrap { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 4px 0 10px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--panel); color: var(--text-3); }
-.seed-sel { font-family: var(--f-mono); font-size: 0.78rem; background: transparent; border: 0; padding: 0.2rem 0.2rem; color: var(--text); outline: none; }
+.seed-sel { font-family: var(--f-mono); font-size: 0.78rem; background-color: transparent; border: 0; padding: 0.2rem 0.2rem; color: var(--text); outline: none; cursor: pointer; }
+.seed-wrap:focus-within { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
 .seed-sel option { background: var(--panel-2); color: var(--text); }
 .own { font-weight: 550; font-size: 0.82rem; color: var(--text-2); }
 .bb-status {

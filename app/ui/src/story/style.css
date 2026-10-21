@@ -565,7 +565,7 @@ pre.schem { margin: 0.6rem 0 0; padding: 0.6rem 0.75rem; overflow-x: auto; font-
 .sheet .opt .ol { font-size: 0.92rem; }
 .sheet .opt small { display: block; color: var(--text-3); font-size: 0.82rem; margin-top: 1px; }
 .sheet .setrow { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0.6rem 0; font-size: 0.92rem; }
-.sheet select { background: var(--bg-1); border: 1px solid var(--line-2); border-radius: var(--r-sm); padding: 0.45rem 0.6rem; min-width: 10rem; color: var(--text); }
+.sheet select { background-color: var(--bg-1); border: 1px solid var(--line-2); border-radius: var(--r-sm); padding: 0.45rem 0.6rem; min-width: 10rem; color: var(--text); }
 .sheet textarea { width: 100%; min-height: 12rem; padding: 0.6rem; border-radius: var(--r-sm); background: var(--bg-1); border: 1px solid var(--line-2); font-family: var(--f-mono); font-size: 0.75rem; line-height: 1.45; color: var(--text); }
 .sheet details.author > summary { list-style: none; display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.86rem; font-weight: 600; color: var(--text-2); }
 .sheet details.author > summary::-webkit-details-marker { display: none; }
