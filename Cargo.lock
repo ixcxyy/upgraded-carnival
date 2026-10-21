@@ -32,7 +32,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "k28"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gimli",
  "k28-build",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "k28-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "k28",
  "k28-build",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "k28-build"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "k28-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "k28",
  "k28-build",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "k28-devserver"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "k28-app",
  "serde_json",
@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "levels"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "k28",
  "serde",

@@ -8,8 +8,8 @@ You are Elias Voss: a student, then a junior engineer on a bench floor where eve
 
 | | |
 |---|---|
-| **Linux** | `Signal Noise_0.1.0_amd64.deb` for Debian 12+, Ubuntu 22.04+ and Mint (`sudo apt install ./Signal*.deb` pulls in WebKitGTK 4.1), or the `.AppImage`, which carries its own libraries: `chmod +x` it and run it. |
-| **Windows** | `Signal Noise_0.1.0_x64-setup.exe`, built by GitHub Actions (see below). Installs for the current user; no administrator rights needed. |
+| **Linux** | `Signal Noise_0.2.0_amd64.deb` for Debian 12+, Ubuntu 22.04+ and Mint (`sudo apt install ./Signal*.deb` pulls in WebKitGTK 4.1), or the `.AppImage`, which carries its own libraries: `chmod +x` it and run it. |
+| **Windows** | `Signal Noise_0.2.0_x64-setup.exe`, built by GitHub Actions (see below). Installs for the current user; no administrator rights needed. |
 
 Everything is inside: the C compiler (zig 0.13, about 180 MB unpacked), the SDK and the datasheet. Nothing is downloaded while you play.
 
@@ -49,7 +49,7 @@ node app/ui/build.mjs --dev
 
 ### Windows installers from GitHub
 
-`.github/workflows/build.yml` builds both platforms. Push the repository to GitHub; every push runs the checks and builds the Linux and Windows installers, which appear under the run's **Artifacts**. Publishing a release on GitHub (**Releases → Draft a new release**, tag `v0.1.0`) builds them once more and attaches them to that release. **Actions → build → Run workflow** starts a build by hand.
+`.github/workflows/build.yml` builds both platforms. Push the repository to GitHub; every push runs the checks and builds the Linux and Windows installers, which appear under the run's **Artifacts**. Publishing a release on GitHub (**Releases → Draft a new release**, tag `v0.2.0`) builds them once more and attaches them to that release. **Actions → build → Run workflow** starts a build by hand.
 
 ## Checks
 

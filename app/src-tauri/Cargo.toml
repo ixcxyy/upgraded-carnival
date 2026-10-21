@@ -1,6 +1,6 @@
 [package]
 name = "signal-noise"
-version = "0.1.0"
+version = "0.2.0"
 description = "Signal / Noise: a story about reading hardware, and people. Write C for an emulated microcontroller."
 edition = "2021"
 publish = false

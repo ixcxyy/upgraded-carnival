@@ -124,7 +124,7 @@ Graphify was not available; this is the state table the redesign was built again
 | Browser QA against the real dev server (`tools/qa/capture.cjs`) | pass — 26/26 checks, 0 page errors | `docs/redesign/qa-report.json`; real compiler, emulator and checkers |
 | Handoff mocked smoke (`tools/qa/mocked-smoke.cjs`, unchanged logic) | pass — failed close keeps the buffer, retry saves, profile switch A→B on the same task path reloads B, focus read keeps newer typing, datasheet search | mocked backend by design |
 | Performance (`tools/qa/perf.cjs`) | recorded — see below | `docs/redesign/perf.json` |
-| Linux bundle `npx tauri build --bundles deb` | pass — `Signal Noise_0.1.0_amd64.deb`, 60.8 MB | after installing the documented Tauri prerequisites |
+| Linux bundle `npx tauri build --bundles deb` | pass — `Signal Noise_0.1.0_amd64.deb`, 60.8 MB (built before the version was raised to 0.2.0) | after installing the documented Tauri prerequisites |
 | Native run (installed `.deb`, WebKitGTK 2.52.6, Xvfb 1440×900) | pass — title, story, bench, a real Run, debugger with reverse step rendered and worked | `docs/redesign/native-*.webp`; driven with xdotool |
 | Windows installer | **not run** — needs a Windows runner | CI workflow unchanged |
 | Native window close/quit flush | **not run** natively — covered by the handoff's mocked close-handler test only | no window manager under Xvfb |
